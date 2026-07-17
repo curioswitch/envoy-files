@@ -52,6 +52,7 @@ enum Command {
         offset: u64,
         len: usize,
         on_done: ReadCallback,
+        queued: std::time::Instant,
     },
     ReadDir {
         path: PathBuf,
@@ -138,6 +139,7 @@ impl crate::IoEngine for CompioEngine {
             offset,
             len,
             on_done,
+            queued: std::time::Instant::now(),
         });
     }
 
@@ -190,7 +192,10 @@ fn run_reactor(rt: Runtime, rx: Receiver<Command>, closer: Sender<Command>) {
                     // Dropping the last `Rc<File>` closes the descriptor. Reads
                     // still in flight hold their own clone, so the close is
                     // deferred until they finish.
+                    let t = std::time::Instant::now();
                     files.borrow_mut().remove(&id);
+                    let ms = t.elapsed().as_millis();
+                    eprintln!("engine: close id={id} remove_ms={ms}");
                 }
                 Command::Open {
                     id,
@@ -209,10 +214,16 @@ fn run_reactor(rt: Runtime, rx: Receiver<Command>, closer: Sender<Command>) {
                     offset,
                     len,
                     on_done,
+                    queued,
                 } => {
                     let file = files.borrow().get(&id).cloned();
                     compio_runtime::spawn(async move {
-                        on_done(read_at(file, offset, len).await);
+                        let result = read_at(file, offset, len).await;
+                        let ms = queued.elapsed().as_millis();
+                        if ms > 20 {
+                            eprintln!("engine: SLOW read id={id} offset={offset} latency_ms={ms}");
+                        }
+                        on_done(result);
                     })
                     .detach();
                 }
