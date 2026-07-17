@@ -227,7 +227,9 @@ mod tests {
     use super::*;
 
     fn root_dir() -> String {
-        std::env::temp_dir().to_string_lossy().into_owned()
+        // Forward slashes so the path is valid inside the JSON test configs on
+        // Windows (backslashes would need escaping); canonicalize accepts them.
+        std::env::temp_dir().to_string_lossy().replace('\\', "/")
     }
 
     #[test]

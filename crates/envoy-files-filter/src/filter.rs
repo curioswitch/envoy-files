@@ -657,9 +657,15 @@ impl Filter {
                     Ok(data) => {
                         streaming.ready.insert(seq, data);
                     }
-                    Err(_) => {
+                    Err(error) => {
                         // Headers are already sent, so the only signal left is
                         // to reset the stream by ending it early.
+                        envoy_proxy_dynamic_modules_rust_sdk::envoy_log_error!(
+                            "envoy-files: read failed mid-stream at seq {seq} \
+                             (kind={:?} errno={:?}); truncating response",
+                            error.kind,
+                            error.raw_os_error
+                        );
                         self.phase = Phase::Done;
                         envoy_filter.send_response_data(&[], true);
                         return;
