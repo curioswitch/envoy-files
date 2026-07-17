@@ -36,8 +36,12 @@ impl Drop for HandleInner {
     fn drop(&mut self) {
         // Ask the runtime thread to drop (and thus close) the file. This fails
         // silently after shutdown or when the file was already closed with the
-        // runtime.
-        let _ = self.closer.try_send(Command::Close { id: self.id });
+        // runtime. Id 0 is the inert handle (file already closed during the
+        // open, see `open_stat`): sending a Close for it would only wake the
+        // reactor for nothing.
+        if self.id != 0 {
+            let _ = self.closer.try_send(Command::Close { id: self.id });
+        }
     }
 }
 
@@ -178,6 +182,8 @@ fn build_runtime(blocking_threads: usize, force_blocking: bool) -> std::io::Resu
 fn run_reactor(rt: Runtime, rx: Receiver<Command>, closer: Sender<Command>) {
     rt.block_on(async move {
         let files: Rc<RefCell<HashMap<u64, Rc<File>>>> = Rc::new(RefCell::new(HashMap::new()));
+        let canon_cache: Rc<RefCell<HashMap<PathBuf, PathBuf>>> =
+            Rc::new(RefCell::new(HashMap::new()));
         loop {
             let command = match rx.recv().await {
                 Ok(command) => command,
@@ -198,9 +204,10 @@ fn run_reactor(rt: Runtime, rx: Receiver<Command>, closer: Sender<Command>) {
                     on_done,
                 } => {
                     let files = files.clone();
+                    let canon_cache = canon_cache.clone();
                     let closer = closer.clone();
                     compio_runtime::spawn(async move {
-                        on_done(open_stat(id, request, &files, closer).await);
+                        on_done(open_stat(id, request, &files, &canon_cache, closer).await);
                     })
                     .detach();
                 }
@@ -234,6 +241,7 @@ async fn open_stat(
     id: u64,
     request: OpenRequest,
     files: &Rc<RefCell<HashMap<u64, Rc<File>>>>,
+    canon_cache: &Rc<RefCell<HashMap<PathBuf, PathBuf>>>,
     closer: Sender<Command>,
 ) -> Result<(FileHandle, FileStat, Vec<u8>), IoError> {
     let mut options = OpenOptions::new();
@@ -259,12 +267,10 @@ async fn open_stat(
 
     if let Some(root) = &request.containment_root {
         // Symlinks may point anywhere; the canonical location of what we opened
-        // must still be inside the root. `canonicalize` is blocking, so it goes
-        // to the runtime's blocking pool rather than stalling the reactor.
-        let path = request.path.clone();
-        let canonical = compio_runtime::spawn_blocking(move || std::fs::canonicalize(&path))
-            .await
-            .unwrap_or_else(|_| Err(std::io::Error::from(ErrorKind::Other)))?;
+        // must still be inside the root. These are fast path-walk syscalls on a
+        // warm dentry cache (~µs) — cheaper to run inline than to pay a
+        // blocking-pool thread hand-off (park/unpark plus wake-ups) per open.
+        let canonical = cached_canonicalize(&request.path, canon_cache)?;
         if !canonical.starts_with(root) {
             return Err(IoError {
                 kind: ErrorKind::PermissionDenied,
@@ -292,9 +298,55 @@ async fn open_stat(
         Vec::new()
     };
 
+    // When the prefetch already holds the entire file the caller never reads
+    // again: skip registration and hand back an inert handle (id 0) whose drop
+    // sends no Close command. The file closes right here when `file` drops,
+    // saving a channel send + reactor wake-up per whole-file request.
+    if !stat.is_dir && prefetch.len() as u64 == stat.size {
+        let handle = FileHandle(std::sync::Arc::new(HandleInner { id: 0, closer }));
+        return Ok((handle, stat, prefetch));
+    }
+
     files.borrow_mut().insert(id, file);
     let handle = FileHandle(std::sync::Arc::new(HandleInner { id, closer }));
     Ok((handle, stat, prefetch))
+}
+
+/// Bound on cached canonical parent directories. Only successfully opened
+/// paths reach the cache, so it grows with the number of real directories
+/// under the roots; the cap is a backstop, not an LRU.
+const CANON_CACHE_MAX: usize = 4096;
+
+/// `std::fs::canonicalize` with a per-reactor cache of canonical parent
+/// directories. `canonicalize` walks every component (a readlinkat per
+/// segment), which under load was the single largest source of wasted
+/// syscalls (3+/request, all "not a symlink"). Serving is dominated by many
+/// files in few directories, so caching the parent's canonical form reduces
+/// the hot path to one `lstat` of the final component; a final-component
+/// symlink (or an uncached parent) falls back to the full walk. Intermediate
+/// symlinked directories stay caught: the parent's canonicalization resolves
+/// them before the join. The check was already open-then-verify (TOCTOU-racy
+/// against concurrent renames); the cache does not change that model.
+fn cached_canonicalize(
+    path: &Path,
+    cache: &Rc<RefCell<HashMap<PathBuf, PathBuf>>>,
+) -> std::io::Result<PathBuf> {
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+        && !std::fs::symlink_metadata(path)?.file_type().is_symlink()
+    {
+        if let Some(canon_parent) = cache.borrow().get(parent) {
+            return Ok(canon_parent.join(name));
+        }
+        let canon_parent = std::fs::canonicalize(parent)?;
+        let canonical = canon_parent.join(name);
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= CANON_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(parent.to_path_buf(), canon_parent);
+        return Ok(canonical);
+    }
+    std::fs::canonicalize(path)
 }
 
 async fn read_at(file: Option<Rc<File>>, offset: u64, len: usize) -> Result<Vec<u8>, IoError> {

@@ -33,7 +33,6 @@ pub struct Config {
     pub chunk_size: usize,
     pub max_inflight_reads: usize,
     pub blocking_threads: Option<usize>,
-    pub io_threads: Option<usize>,
     pub force_blocking: bool,
     pub etag: bool,
     pub last_modified: bool,
@@ -55,7 +54,6 @@ const KNOWN_KEYS: &[&str] = &[
     "chunk_size",
     "max_inflight_reads",
     "blocking_threads",
-    "io_threads",
     "force_blocking",
     "etag",
     "last_modified",
@@ -181,16 +179,6 @@ pub fn parse(raw: &[u8]) -> Result<Config, String> {
         ),
     };
 
-    let io_threads = match &doc["io_threads"] {
-        Yaml::BadValue => None,
-        value => Some(
-            value
-                .as_i64()
-                .filter(|&n| (1..=256).contains(&n))
-                .ok_or("io_threads must be an integer in 1..=256")? as usize,
-        ),
-    };
-
     Ok(Config {
         root,
         strip_prefix,
@@ -202,7 +190,6 @@ pub fn parse(raw: &[u8]) -> Result<Config, String> {
         chunk_size,
         max_inflight_reads,
         blocking_threads,
-        io_threads,
         force_blocking: bool_or(doc, "force_blocking", false)?,
         etag: bool_or(doc, "etag", true)?,
         last_modified: bool_or(doc, "last_modified", true)?,
