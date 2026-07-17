@@ -50,6 +50,8 @@ enum IoEvent {
         handle: FileHandle,
         stat: FileStat,
         ctx: OpenCtx,
+        /// Bytes prefetched from offset 0 during the open (empty if none).
+        prefetch: Vec<u8>,
     },
     OpenError {
         error: IoError,
@@ -339,16 +341,29 @@ impl Filter {
 
     fn submit_open(&self, fs_path: PathBuf, ctx: OpenCtx) {
         let waker = self.waker.clone().expect("waker set before open");
+        // Fold the first chunk into the open for a plain whole-file GET (the
+        // response streams from offset 0). Skip for HEAD (no body) and range
+        // requests (body doesn't start at 0), where the prefetch would be waste.
+        let prefetch_len = match &self.request {
+            Some(req) if !req.method_head && req.range_header.is_none() => self.config.chunk_size,
+            _ => 0,
+        };
         let request = OpenRequest {
             path: fs_path,
             containment_root: Some(self.config.root.clone()),
             deny_symlinks: !self.config.follow_symlinks_within_root,
+            prefetch_len,
         };
         self.engine.open_stat(
             request,
             Box::new(move |result| {
                 let event = match result {
-                    Ok((handle, stat)) => IoEvent::Opened { handle, stat, ctx },
+                    Ok((handle, stat, prefetch)) => IoEvent::Opened {
+                        handle,
+                        stat,
+                        ctx,
+                        prefetch,
+                    },
                     Err(error) => {
                         drop(ctx);
                         IoEvent::OpenError { error }
@@ -368,9 +383,12 @@ impl Filter {
         event: IoEvent,
     ) -> bool {
         match event {
-            IoEvent::Opened { handle, stat, ctx } => {
-                self.handle_opened(envoy_filter, handle, stat, ctx)
-            }
+            IoEvent::Opened {
+                handle,
+                stat,
+                ctx,
+                prefetch,
+            } => self.handle_opened(envoy_filter, handle, stat, ctx, prefetch),
             IoEvent::OpenError { error } => self.handle_open_error(envoy_filter, error),
             IoEvent::Read { seq, result } => self.handle_read(envoy_filter, seq, result),
             IoEvent::Dir { result } => self.handle_dir(envoy_filter, result),
@@ -383,6 +401,7 @@ impl Filter {
         handle: FileHandle,
         stat: FileStat,
         ctx: OpenCtx,
+        prefetch: Vec<u8>,
     ) -> bool {
         if stat.is_dir {
             if ctx.encoding.is_some() {
@@ -391,7 +410,7 @@ impl Filter {
             }
             return self.handle_directory(envoy_filter);
         }
-        self.serve_file(envoy_filter, handle, stat, ctx)
+        self.serve_file(envoy_filter, handle, stat, ctx, prefetch)
     }
 
     fn handle_open_error<EHF: EnvoyHttpFilter>(
@@ -524,6 +543,7 @@ impl Filter {
         handle: FileHandle,
         stat: FileStat,
         ctx: OpenCtx,
+        prefetch: Vec<u8>,
     ) -> bool {
         let request = self.request.as_ref().expect("request set");
         let range_header = if self.config.ranges == RangeSupport::None {
@@ -564,7 +584,7 @@ impl Filter {
             is_dir: false,
         };
         let plan = plan_response(&facts, &meta);
-        self.execute_plan(envoy_filter, plan, handle)
+        self.execute_plan(envoy_filter, plan, handle, prefetch)
     }
 
     fn execute_plan<EHF: EnvoyHttpFilter>(
@@ -572,6 +592,7 @@ impl Filter {
         envoy_filter: &mut EHF,
         plan: ResponsePlan,
         handle: FileHandle,
+        prefetch: Vec<u8>,
     ) -> bool {
         let status = plan.status;
         let mut headers: Vec<(&str, &[u8])> = Vec::with_capacity(plan.headers.len() + 1);
@@ -583,6 +604,14 @@ impl Filter {
             envoy_filter.send_response_headers(&headers, true);
             return true;
         }
+
+        // The prefetch (if any) holds bytes [0, chunk_size) and is only valid
+        // for a body that streams from offset 0 — i.e. a Whole plan, which is
+        // also the only case submit_open requested a prefetch for.
+        let prefetch = match plan.body {
+            BodyPlan::Whole { .. } => prefetch,
+            _ => Vec::new(),
+        };
 
         let chunks = match plan.body {
             BodyPlan::Empty => unreachable!("handled above"),
@@ -608,7 +637,7 @@ impl Filter {
                 chunks
             }
         };
-        self.begin_streaming(envoy_filter, &headers, handle, chunks)
+        self.begin_streaming(envoy_filter, &headers, handle, chunks, prefetch)
     }
 
     fn file_chunks(&self, start: u64, len: u64) -> Vec<Chunk> {
@@ -633,6 +662,7 @@ impl Filter {
         headers: &[(&str, &[u8])],
         handle: FileHandle,
         chunks: Vec<Chunk>,
+        prefetch: Vec<u8>,
     ) -> bool {
         if chunks.is_empty() {
             self.phase = Phase::Done;
@@ -645,6 +675,14 @@ impl Filter {
             if let Chunk::Inline(bytes) = chunk {
                 ready.insert(seq, bytes.clone());
             }
+        }
+        // Seed chunk 0 from the prefetch when it exactly covers that file chunk,
+        // so pump can flush it without issuing a read (the read-issue loop skips
+        // chunks already in `ready`).
+        if let Some(Chunk::File { offset: 0, len }) = chunks.first()
+            && prefetch.len() == *len
+        {
+            ready.insert(0, prefetch);
         }
         self.phase = Phase::Streaming(Streaming {
             handle,
@@ -743,6 +781,11 @@ impl Filter {
             {
                 let index = streaming.issue_cursor;
                 streaming.issue_cursor += 1;
+                // Skip chunks already satisfied (inline framing, or chunk 0 seeded
+                // from the open's prefetch) so they aren't read a second time.
+                if streaming.ready.contains_key(&index) {
+                    continue;
+                }
                 if let Chunk::File { offset, len } = streaming.chunks[index] {
                     streaming.inflight += 1;
                     requests.push((index, offset, len, streaming.handle.clone()));

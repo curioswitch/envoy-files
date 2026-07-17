@@ -235,7 +235,7 @@ async fn open_stat(
     request: OpenRequest,
     files: &Rc<RefCell<HashMap<u64, Rc<File>>>>,
     closer: Sender<Command>,
-) -> Result<(FileHandle, FileStat), IoError> {
+) -> Result<(FileHandle, FileStat, Vec<u8>), IoError> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -274,9 +274,27 @@ async fn open_stat(
     }
 
     let stat = stat_from_metadata(&metadata);
-    files.borrow_mut().insert(id, Rc::new(file));
+    let file = Rc::new(file);
+
+    // Optionally fold the first chunk into the open so a whole-file GET can
+    // serve it without a second round-trip. A read error here is not fatal:
+    // return an empty prefix and let the normal read path surface the error.
+    let want = if stat.is_dir {
+        0
+    } else {
+        request.prefetch_len.min(stat.size as usize)
+    };
+    let prefetch = if want > 0 {
+        read_at(Some(file.clone()), 0, want)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    files.borrow_mut().insert(id, file);
     let handle = FileHandle(std::sync::Arc::new(HandleInner { id, closer }));
-    Ok((handle, stat))
+    Ok((handle, stat, prefetch))
 }
 
 async fn read_at(file: Option<Rc<File>>, offset: u64, len: usize) -> Result<Vec<u8>, IoError> {
@@ -389,12 +407,15 @@ mod tests {
                 path,
                 containment_root: None,
                 deny_symlinks: false,
+                prefetch_len: 4,
             },
             Box::new(move |result| tx.send(result).unwrap()),
         );
-        let (handle, stat) = rx.recv().unwrap().unwrap();
+        let (handle, stat, prefetch) = rx.recv().unwrap().unwrap();
         assert_eq!(stat.size, 10);
         assert!(!stat.is_dir);
+        // prefetch_len=4 returns exactly the first four bytes.
+        assert_eq!(prefetch, b"0123");
 
         // Two reads issued back to back, completing in either order.
         let (tx, rx) = mpsc::channel();
@@ -424,6 +445,7 @@ mod tests {
                 path: PathBuf::from("/nonexistent/does/not/exist"),
                 containment_root: None,
                 deny_symlinks: false,
+                prefetch_len: 0,
             },
             Box::new(move |result| tx.send(result).unwrap()),
         );

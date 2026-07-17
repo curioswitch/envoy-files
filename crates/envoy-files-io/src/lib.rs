@@ -47,9 +47,18 @@ pub struct OpenRequest {
     pub containment_root: Option<PathBuf>,
     /// Refuse to open through a symlink at the final component.
     pub deny_symlinks: bool,
+    /// If non-zero and the target is a regular file, the engine also reads up to
+    /// this many bytes from offset 0 and returns them alongside the stat, so a
+    /// common whole-file GET can serve its first chunk without a second
+    /// worker↔engine round-trip. Ignored for directories.
+    pub prefetch_len: usize,
 }
 
-pub type OpenStatCallback = Box<dyn FnOnce(Result<(FileHandle, FileStat), IoError>) + Send>;
+/// On success: the open file handle, its stat, and any prefetched prefix (bytes
+/// from offset 0, up to `prefetch_len`; empty when no prefetch was requested or
+/// the target is a directory).
+pub type OpenStatCallback =
+    Box<dyn FnOnce(Result<(FileHandle, FileStat, Vec<u8>), IoError>) + Send>;
 /// The buffer's length is the number of bytes read; empty means EOF.
 pub type ReadCallback = Box<dyn FnOnce(Result<Vec<u8>, IoError>) + Send>;
 pub type ReadDirCallback = Box<dyn FnOnce(Result<Vec<DirEntryInfo>, IoError>) + Send>;
