@@ -5,7 +5,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-const ENVOY_SERVER_VERSION: &str = "1.38.3";
+const ENVOY_SERVER_VERSION: &str = "1.39.0";
 
 /// Path to the Envoy binary, fetched and cached on first use.
 pub fn envoy_binary() -> &'static Path {
