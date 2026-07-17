@@ -242,6 +242,18 @@ async fn open_stat(
     if request.deny_symlinks {
         options.custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        // On Windows a directory handle can only be obtained with
+        // FILE_FLAG_BACKUP_SEMANTICS; without it CreateFile fails with
+        // ERROR_ACCESS_DENIED, so directory index/listing/trailing-slash
+        // resolution never sees `is_dir` (it surfaces as a 403 instead).
+        // The flag is harmless for regular files. Symlink handling on Windows
+        // is left to the canonical-containment check below (unlike O_NOFOLLOW,
+        // there is no cheap open-time equivalent here).
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
     let file = options.open(&request.path).await?;
     let metadata = file.metadata().await?;
 
