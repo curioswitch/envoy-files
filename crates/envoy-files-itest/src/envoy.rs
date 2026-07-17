@@ -23,7 +23,11 @@ pub fn module_path() -> &'static Path {
 }
 
 fn target_dir() -> PathBuf {
-    // CARGO_TARGET_TMPDIR is <target>/tmp/<pkg>; walk up to <target>.
+    // Honor a custom target dir (e.g. CI/containers set CARGO_TARGET_DIR);
+    // otherwise derive <workspace>/target from this crate's manifest dir.
+    if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        return PathBuf::from(dir);
+    }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
@@ -33,7 +37,7 @@ fn target_dir() -> PathBuf {
 }
 
 fn fetch_envoy() -> PathBuf {
-    let cache = target_dir().join("envoy-bin");
+    let cache = target_dir().join(format!("envoy-bin-{ENVOY_SERVER_VERSION}"));
     let binary = cache.join(if cfg!(windows) { "envoy.dll" } else { "envoy" });
     if binary.exists() {
         return binary;

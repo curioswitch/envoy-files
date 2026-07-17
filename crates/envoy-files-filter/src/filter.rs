@@ -12,7 +12,7 @@ use envoy_files_core::response_plan::{
 use envoy_files_core::validators::ConditionalHeaders;
 use envoy_files_io::{DirEntryInfo, FileHandle, FileStat, IoEngine, IoError, OpenRequest};
 use envoy_proxy_dynamic_modules_rust_sdk::{
-    EnvoyHttpFilter, EnvoyHttpFilterScheduler, HttpFilter, abi,
+    EnvoyHttpFilter, EnvoyHttpFilterScheduler, HttpFilter, abi, envoy_log_error,
 };
 
 use crate::config::{Config, DirectoryMode, RangeSupport};
@@ -217,7 +217,12 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
         let mut events = Vec::new();
         self.bridge.process(|event| events.push(event));
         for event in events {
-            self.handle_event(envoy_filter, event);
+            if self.handle_event(envoy_filter, event) {
+                return;
+            }
+        }
+        if matches!(self.phase, Phase::Streaming(_)) {
+            self.pump(envoy_filter);
         }
     }
 
@@ -227,7 +232,7 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
         }
     }
 
-    fn on_downstream_below_write_buffer_low_watermark(&mut self, envoy_filter: &mut EHF) {
+    fn on_downstream_below_write_buffer_low_watermark(&mut self, _envoy_filter: &mut EHF) {
         let resumed = match &mut self.phase {
             Phase::Streaming(streaming) => {
                 streaming.watermark_depth = streaming.watermark_depth.saturating_sub(1);
@@ -235,8 +240,8 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
             }
             _ => false,
         };
-        if resumed {
-            self.pump(envoy_filter);
+        if resumed && let Some(waker) = &self.waker {
+            waker.scheduler.commit(EVENT_ID_IO);
         }
     }
 
@@ -294,25 +299,26 @@ impl Filter {
         candidates
     }
 
-    fn open_next_candidate<EHF: EnvoyHttpFilter>(&mut self, envoy_filter: &mut EHF) {
+    fn open_next_candidate<EHF: EnvoyHttpFilter>(&mut self, envoy_filter: &mut EHF) -> bool {
         let Phase::ResolvingFile { pending } = &mut self.phase else {
-            return;
+            return false;
         };
         let Some(candidate) = pending.pop_front() else {
-            self.respond_status(envoy_filter, http::StatusCode::NOT_FOUND);
-            return;
+            return self.respond_status(envoy_filter, http::StatusCode::NOT_FOUND);
         };
         let ctx = OpenCtx {
             encoding: candidate.encoding,
             content_type: candidate.content_type,
             add_vary: candidate.add_vary,
         };
+        // submit_open only queues an async open; the stream is not ended here.
         self.submit_open(candidate.fs_path, ctx);
+        false
     }
 
-    fn open_next_index<EHF: EnvoyHttpFilter>(&mut self, envoy_filter: &mut EHF) {
+    fn open_next_index<EHF: EnvoyHttpFilter>(&mut self, envoy_filter: &mut EHF) -> bool {
         let Phase::ResolvingIndex { pending, dir_fs } = &mut self.phase else {
-            return;
+            return false;
         };
         match pending.pop_front() {
             Some((fs_path, content_type)) => {
@@ -322,10 +328,11 @@ impl Filter {
                     add_vary: false,
                 };
                 self.submit_open(fs_path, ctx);
+                false
             }
             None => {
                 let dir_fs = dir_fs.clone();
-                self.directory_fallback(envoy_filter, dir_fs);
+                self.directory_fallback(envoy_filter, dir_fs)
             }
         }
     }
@@ -352,7 +359,14 @@ impl Filter {
         );
     }
 
-    fn handle_event<EHF: EnvoyHttpFilter>(&mut self, envoy_filter: &mut EHF, event: IoEvent) {
+    /// Dispatches one I/O event. Returns `true` if it ended the stream (any
+    /// terminal send) — after which Envoy may have destroyed this filter, so the
+    /// caller must not touch `self`.
+    fn handle_event<EHF: EnvoyHttpFilter>(
+        &mut self,
+        envoy_filter: &mut EHF,
+        event: IoEvent,
+    ) -> bool {
         match event {
             IoEvent::Opened { handle, stat, ctx } => {
                 self.handle_opened(envoy_filter, handle, stat, ctx)
@@ -369,20 +383,22 @@ impl Filter {
         handle: FileHandle,
         stat: FileStat,
         ctx: OpenCtx,
-    ) {
+    ) -> bool {
         if stat.is_dir {
             if ctx.encoding.is_some() {
                 // A precompressed path resolved to a directory; ignore it.
-                self.advance_after_open_miss(envoy_filter);
-                return;
+                return self.advance_after_open_miss(envoy_filter);
             }
-            self.handle_directory(envoy_filter);
-            return;
+            return self.handle_directory(envoy_filter);
         }
-        self.serve_file(envoy_filter, handle, stat, ctx);
+        self.serve_file(envoy_filter, handle, stat, ctx)
     }
 
-    fn handle_open_error<EHF: EnvoyHttpFilter>(&mut self, envoy_filter: &mut EHF, error: IoError) {
+    fn handle_open_error<EHF: EnvoyHttpFilter>(
+        &mut self,
+        envoy_filter: &mut EHF,
+        error: IoError,
+    ) -> bool {
         match &self.phase {
             Phase::ResolvingFile { pending } if !pending.is_empty() => {
                 self.open_next_candidate(envoy_filter)
@@ -390,22 +406,22 @@ impl Filter {
             Phase::ResolvingFile { .. } => {
                 let status =
                     envoy_files_core::error::status_for_io_error(error.kind, error.raw_os_error);
-                self.respond_status(envoy_filter, status);
+                self.respond_status(envoy_filter, status)
             }
             Phase::ResolvingIndex { .. } => self.open_next_index(envoy_filter),
-            _ => {}
+            _ => false,
         }
     }
 
-    fn advance_after_open_miss<EHF: EnvoyHttpFilter>(&mut self, envoy_filter: &mut EHF) {
+    fn advance_after_open_miss<EHF: EnvoyHttpFilter>(&mut self, envoy_filter: &mut EHF) -> bool {
         match &self.phase {
             Phase::ResolvingFile { .. } => self.open_next_candidate(envoy_filter),
             Phase::ResolvingIndex { .. } => self.open_next_index(envoy_filter),
-            _ => {}
+            _ => false,
         }
     }
 
-    fn handle_directory<EHF: EnvoyHttpFilter>(&mut self, envoy_filter: &mut EHF) {
+    fn handle_directory<EHF: EnvoyHttpFilter>(&mut self, envoy_filter: &mut EHF) -> bool {
         let request = self.request.as_ref().expect("request set");
         let relative = request.relative.clone();
         let trailing_slash = request.trailing_slash;
@@ -414,12 +430,11 @@ impl Filter {
             let location = format!("{}/", self.url_for(&relative));
             self.phase = Phase::Done;
             envoy_filter.send_response(301, &[("location", location.as_bytes())], None, None);
-            return;
+            return true;
         }
 
         if self.config.directory == DirectoryMode::Deny {
-            self.respond_status(envoy_filter, http::StatusCode::FORBIDDEN);
-            return;
+            return self.respond_status(envoy_filter, http::StatusCode::FORBIDDEN);
         }
 
         let dir_fs = self.config.root.join(&relative);
@@ -439,25 +454,27 @@ impl Filter {
             .collect();
 
         if pending.is_empty() {
-            self.directory_fallback(envoy_filter, dir_fs);
-            return;
+            return self.directory_fallback(envoy_filter, dir_fs);
         }
         self.phase = Phase::ResolvingIndex { dir_fs, pending };
-        self.open_next_index(envoy_filter);
+        self.open_next_index(envoy_filter)
     }
 
     fn directory_fallback<EHF: EnvoyHttpFilter>(
         &mut self,
         envoy_filter: &mut EHF,
         dir_fs: PathBuf,
-    ) {
+    ) -> bool {
         match self.config.directory {
             DirectoryMode::Listing => {
+                // The listing is sent later, in handle_dir; this only kicks off
+                // the async read_dir, so the stream is not ended here.
                 let waker = self.waker.clone().expect("waker set");
                 self.engine.read_dir(
                     dir_fs,
                     Box::new(move |result| waker.deliver(IoEvent::Dir { result })),
                 );
+                false
             }
             DirectoryMode::Index | DirectoryMode::Deny => {
                 self.respond_status(envoy_filter, http::StatusCode::NOT_FOUND)
@@ -469,14 +486,13 @@ impl Filter {
         &mut self,
         envoy_filter: &mut EHF,
         result: Result<Vec<DirEntryInfo>, IoError>,
-    ) {
+    ) -> bool {
         let entries = match result {
             Ok(entries) => entries,
             Err(error) => {
                 let status =
                     envoy_files_core::error::status_for_io_error(error.kind, error.raw_os_error);
-                self.respond_status(envoy_filter, status);
-                return;
+                return self.respond_status(envoy_filter, status);
             }
         };
         let relative = self.request.as_ref().expect("request set").relative.clone();
@@ -499,6 +515,7 @@ impl Filter {
             Some(html.as_bytes()),
             None,
         );
+        true
     }
 
     fn serve_file<EHF: EnvoyHttpFilter>(
@@ -507,7 +524,7 @@ impl Filter {
         handle: FileHandle,
         stat: FileStat,
         ctx: OpenCtx,
-    ) {
+    ) -> bool {
         let request = self.request.as_ref().expect("request set");
         let range_header = if self.config.ranges == RangeSupport::None {
             None
@@ -547,7 +564,7 @@ impl Filter {
             is_dir: false,
         };
         let plan = plan_response(&facts, &meta);
-        self.execute_plan(envoy_filter, plan, handle);
+        self.execute_plan(envoy_filter, plan, handle)
     }
 
     fn execute_plan<EHF: EnvoyHttpFilter>(
@@ -555,7 +572,7 @@ impl Filter {
         envoy_filter: &mut EHF,
         plan: ResponsePlan,
         handle: FileHandle,
-    ) {
+    ) -> bool {
         let status = plan.status;
         let mut headers: Vec<(&str, &[u8])> = Vec::with_capacity(plan.headers.len() + 1);
         headers.push((":status", status.as_str().as_bytes()));
@@ -564,7 +581,7 @@ impl Filter {
         if let BodyPlan::Empty = plan.body {
             self.phase = Phase::Done;
             envoy_filter.send_response_headers(&headers, true);
-            return;
+            return true;
         }
 
         let chunks = match plan.body {
@@ -591,7 +608,7 @@ impl Filter {
                 chunks
             }
         };
-        self.begin_streaming(envoy_filter, &headers, handle, chunks);
+        self.begin_streaming(envoy_filter, &headers, handle, chunks)
     }
 
     fn file_chunks(&self, start: u64, len: u64) -> Vec<Chunk> {
@@ -616,11 +633,11 @@ impl Filter {
         headers: &[(&str, &[u8])],
         handle: FileHandle,
         chunks: Vec<Chunk>,
-    ) {
+    ) -> bool {
         if chunks.is_empty() {
             self.phase = Phase::Done;
             envoy_filter.send_response_headers(headers, true);
-            return;
+            return true;
         }
 
         let mut ready = HashMap::new();
@@ -629,8 +646,6 @@ impl Filter {
                 ready.insert(seq, bytes.clone());
             }
         }
-        // Enter Streaming before sending headers so a reentrant watermark hook
-        // observes the streaming state.
         self.phase = Phase::Streaming(Streaming {
             handle,
             chunks,
@@ -640,8 +655,10 @@ impl Filter {
             inflight: 0,
             watermark_depth: 0,
         });
+        // Headers with end_stream=false do not end the stream; on_scheduled
+        // issues the initial reads and flushes after this event is handled.
         envoy_filter.send_response_headers(headers, false);
-        self.pump(envoy_filter);
+        false
     }
 
     fn handle_read<EHF: EnvoyHttpFilter>(
@@ -649,26 +666,32 @@ impl Filter {
         envoy_filter: &mut EHF,
         seq: usize,
         result: Result<Vec<u8>, IoError>,
-    ) {
-        match &mut self.phase {
-            Phase::Streaming(streaming) => {
-                streaming.inflight = streaming.inflight.saturating_sub(1);
-                match result {
-                    Ok(data) => {
-                        streaming.ready.insert(seq, data);
-                    }
-                    Err(_) => {
-                        // Headers are already sent, so the only signal left is
-                        // to reset the stream by ending it early.
-                        self.phase = Phase::Done;
-                        envoy_filter.send_response_data(&[], true);
-                        return;
-                    }
-                }
+    ) -> bool {
+        let Phase::Streaming(streaming) = &mut self.phase else {
+            return false;
+        };
+        streaming.inflight = streaming.inflight.saturating_sub(1);
+        match result {
+            Ok(data) => {
+                streaming.ready.insert(seq, data);
+                // The flush + read-window refill is driven by on_scheduled once
+                // every event in this batch is handled.
+                false
             }
-            _ => return,
+            Err(error) => {
+                // Headers are already sent, so the only signal left is to reset
+                // the stream by ending it early.
+                envoy_log_error!(
+                    "envoy-files: read failed mid-stream at seq {seq} \
+                     (kind={:?} errno={:?}); truncating response",
+                    error.kind,
+                    error.raw_os_error
+                );
+                self.phase = Phase::Done;
+                envoy_filter.send_response_data(&[], true);
+                true
+            }
         }
-        self.pump(envoy_filter);
     }
 
     fn pump<EHF: EnvoyHttpFilter>(&mut self, envoy_filter: &mut EHF) {
@@ -752,14 +775,16 @@ impl Filter {
 
     /// Sends a bodyless status response. Only called before any response
     /// headers have been sent. Phase is advanced before the send because the
-    /// send ends the stream and `self` must not be touched afterward.
+    /// send ends the stream and `self` must not be touched afterward. Always
+    /// returns `true` (the stream is ended) for callers threading that signal.
     fn respond_status<EHF: EnvoyHttpFilter>(
         &mut self,
         envoy_filter: &mut EHF,
         status: http::StatusCode,
-    ) {
+    ) -> bool {
         self.phase = Phase::Done;
         envoy_filter.send_response(status.as_u16() as u32, &[], None, None);
+        true
     }
 }
 

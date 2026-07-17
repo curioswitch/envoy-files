@@ -41,10 +41,15 @@ fn slow_reader_gets_intact_body() {
         "unexpected status line"
     );
 
+    // Keep-alive connection: the body is framed by Content-Length, so read
+    // exactly that many bytes (an early EOF shows up as received < total).
+    let total = std::fs::metadata(SERVER.0.path().join("big.bin"))
+        .unwrap()
+        .len() as usize;
     let mut digest = Sha256::new();
     let mut received = 0usize;
     let mut chunk = [0u8; 16384];
-    loop {
+    while received < total {
         // Deliberately slow so Envoy's write buffer fills and the module is
         // forced to pause and resume.
         std::thread::sleep(Duration::from_micros(500));
@@ -56,9 +61,6 @@ fn slow_reader_gets_intact_body() {
         received += n;
     }
 
-    let total = std::fs::metadata(SERVER.0.path().join("big.bin"))
-        .unwrap()
-        .len() as usize;
     assert_eq!(received, total);
     assert_eq!(format!("{:x}", digest.finalize()), SERVER.0.big_sha256);
 }

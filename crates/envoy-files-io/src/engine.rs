@@ -242,6 +242,18 @@ async fn open_stat(
     if request.deny_symlinks {
         options.custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        // On Windows a directory handle can only be obtained with
+        // FILE_FLAG_BACKUP_SEMANTICS; without it CreateFile fails with
+        // ERROR_ACCESS_DENIED, so directory index/listing/trailing-slash
+        // resolution never sees `is_dir` (it surfaces as a 403 instead).
+        // The flag is harmless for regular files. Symlink handling on Windows
+        // is left to the canonical-containment check below (unlike O_NOFOLLOW,
+        // there is no cheap open-time equivalent here).
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
     let file = options.open(&request.path).await?;
     let metadata = file.metadata().await?;
 
@@ -275,13 +287,27 @@ async fn read_at(file: Option<Rc<File>>, offset: u64, len: usize) -> Result<Vec<
             raw_os_error: None,
         });
     };
-    // `read_at` fills spare capacity and returns the buffer with its length set
-    // to the byte count, so start from an empty-but-reserved Vec.
-    let BufResult(result, buf) = file.read_at(Vec::with_capacity(len), offset).await;
-    match result {
-        Ok(_) => Ok(buf),
-        Err(error) => Err(error.into()),
+    // A single `read_at` may return fewer bytes than requested (a short read is
+    // legal on every backend). The caller expects exactly `len` bytes for a
+    // chunk, so loop until it's filled or EOF — otherwise the gap is silently
+    // dropped and the response ends up shorter than its Content-Length.
+    // `read_at` returns the buffer with its length set to the bytes read.
+    let BufResult(result, mut buf) = file.read_at(Vec::with_capacity(len), offset).await;
+    let first = result?;
+    if first == len || first == 0 {
+        return Ok(buf); // Full read (the common case) or immediate EOF.
     }
+    while buf.len() < len {
+        let want = len - buf.len();
+        let at = offset + buf.len() as u64;
+        let BufResult(result, more) = file.read_at(Vec::with_capacity(want), at).await;
+        let n = result?;
+        if n == 0 {
+            break; // EOF before `len`: return the true prefix.
+        }
+        buf.extend_from_slice(&more[..n]);
+    }
+    Ok(buf)
 }
 
 fn read_dir(path: &Path) -> Result<Vec<DirEntryInfo>, IoError> {
