@@ -2,41 +2,19 @@ use std::io::Read;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use envoy_files_itest::{EnvoyServer, Www, terminal_config};
+use envoy_files_itest::{EnvoyServer, Www};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
 static SERVER: LazyLock<(Www, EnvoyServer)> = LazyLock::new(|| {
     let www = Www::build();
-    // Capture Envoy's log (info level) so the module's streaming diagnostics
-    // are visible in CI when an assertion fails.
-    let server = EnvoyServer::with_config_capturing_backend(
-        terminal_config(json!({
-            "root": www.path().to_str().unwrap(),
-            "chunk_size": 65536,
-            "max_inflight_reads": 2,
-        })),
-        false,
-    );
+    let server = EnvoyServer::terminal(json!({
+        "root": www.path().to_str().unwrap(),
+        "chunk_size": 65536,
+        "max_inflight_reads": 2,
+    }));
     (www, server)
 });
-
-fn dump_module_log(server: &EnvoyServer) {
-    if let Some(log) = server.log_contents() {
-        eprintln!("--- envoy-files module + engine log ---");
-        for line in log
-            .lines()
-            .filter(|l| l.contains("envoy-files") || l.contains("engine:"))
-        {
-            eprintln!("{line}");
-        }
-        eprintln!("--- last 200 Envoy log lines (teardown) ---");
-        let lines: Vec<&str> = log.lines().collect();
-        for line in lines.iter().skip(lines.len().saturating_sub(200)) {
-            eprintln!("{line}");
-        }
-    }
-}
 
 fn read_http_body_start(stream: &mut impl Read) -> (Vec<u8>, Vec<u8>) {
     // Read until the header/body separator, returning (headers, leftover body).
@@ -63,10 +41,15 @@ fn slow_reader_gets_intact_body() {
         "unexpected status line"
     );
 
+    // Keep-alive connection: the body is framed by Content-Length, so read
+    // exactly that many bytes (an early EOF shows up as received < total).
+    let total = std::fs::metadata(SERVER.0.path().join("big.bin"))
+        .unwrap()
+        .len() as usize;
     let mut digest = Sha256::new();
     let mut received = 0usize;
     let mut chunk = [0u8; 16384];
-    loop {
+    while received < total {
         // Deliberately slow so Envoy's write buffer fills and the module is
         // forced to pause and resume.
         std::thread::sleep(Duration::from_micros(500));
@@ -78,13 +61,6 @@ fn slow_reader_gets_intact_body() {
         received += n;
     }
 
-    let total = std::fs::metadata(SERVER.0.path().join("big.bin"))
-        .unwrap()
-        .len() as usize;
-    if received != total {
-        eprintln!("slow_reader truncated: received={received} total={total}");
-        dump_module_log(&SERVER.1);
-    }
     assert_eq!(received, total);
     assert_eq!(format!("{:x}", digest.finalize()), SERVER.0.big_sha256);
 }

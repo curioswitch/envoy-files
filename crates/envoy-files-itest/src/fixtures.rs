@@ -35,7 +35,9 @@ impl Www {
 
         std::fs::create_dir_all(root.join("listing-dir")).unwrap();
         write(&root, "listing-dir/a.txt", b"a");
-        write(&root, "listing-dir/<evil>.txt", b"x");
+        // `&` needs HTML escaping in listings and, unlike `<`/`>`, is a legal
+        // filename character on Windows too.
+        write(&root, "listing-dir/evil&name.txt", b"x");
 
         let js = b"console.log('envoy files');\n".repeat(10);
         write(&root, "app.js", &js);

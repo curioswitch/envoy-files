@@ -87,14 +87,21 @@ impl EnvoyServer {
         };
 
         let admin_file = unique_tmp("admin").with_extension("txt");
-        let mut command = Command::new(envoy::envoy_binary());
-        command
+        let process = Command::new(envoy::envoy_binary())
             .args([
                 "--config-yaml",
                 &config.to_string(),
                 "--admin-address-path",
                 admin_file.to_str().unwrap(),
-                "--use-dynamic-base-id",
+                // Envoy's hot-restart machinery (enabled in the Linux wheel)
+                // sets PR_SET_PDEATHSIG=SIGTERM, and Linux ties that to the
+                // *thread* that spawned the child. Tests spawn from short-lived
+                // libtest threads (e.g. inside a shared LazyLock init), so an
+                // Envoy left hot-restart-enabled is killed as soon as the
+                // spawning test finishes, truncating other tests' in-flight
+                // responses. No hot restart also means no shared memory, so no
+                // base-id management is needed for parallel instances.
+                "--disable-hot-restart",
                 "--log-level",
                 log_level,
             ])
@@ -103,16 +110,9 @@ impl EnvoyServer {
             // an inherited stdout pipe would keep `cargo test | ...` from ever
             // seeing EOF. The atexit hook below still kills it.
             .stdout(Stdio::null())
-            .stderr(stderr);
-        if capture_log {
-            // Downstream connection/stream debug so a captured run shows why a
-            // stream is torn down.
-            command.args([
-                "--component-log-level",
-                "http:debug,connection:debug,pool:debug",
-            ]);
-        }
-        let process = command.spawn().expect("spawn envoy");
+            .stderr(stderr)
+            .spawn()
+            .expect("spawn envoy");
         register_for_cleanup(process.id());
 
         let mut server = EnvoyServer {
@@ -126,11 +126,6 @@ impl EnvoyServer {
         server.await_ready(&admin_file);
         let _ = std::fs::remove_file(&admin_file);
         server
-    }
-
-    /// Full captured Envoy log (diagnostics), when started with backend capture.
-    pub fn log_contents(&self) -> Option<String> {
-        std::fs::read_to_string(self.log_path.as_ref()?).ok()
     }
 
     /// The io backend the module logged at startup ("compio-io_uring",
@@ -232,9 +227,12 @@ impl EnvoyServer {
 
     /// Raw HTTP/1.1 request over a bare socket, returning the connection so a
     /// test can read the body slowly (backpressure / disconnect scenarios).
+    /// Deliberately keep-alive: `Connection: close` would put Envoy into its
+    /// deferred-close path when the response completes, which can race a
+    /// slow-draining client; callers frame the body by `Content-Length`.
     pub fn raw_request(&self, path: &str) -> TcpStream {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("connect to envoy");
-        let request = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        let request = format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n");
         stream.write_all(request.as_bytes()).expect("write request");
         stream
     }

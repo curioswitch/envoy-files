@@ -81,8 +81,8 @@ fn directory_listing_escapes_html() {
     assert_eq!(r.status, 200);
     assert!(r.header("content-type").unwrap().starts_with("text/html"));
     let body = String::from_utf8_lossy(&r.body);
-    assert!(!body.contains("<evil>"));
-    assert!(body.contains("&lt;evil&gt;"));
+    assert!(!body.contains("evil&name.txt"));
+    assert!(body.contains("evil&amp;name.txt"));
     assert!(body.contains("a.txt"));
 }
 
