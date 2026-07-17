@@ -145,17 +145,20 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
         _end_of_stream: bool,
     ) -> abi::envoy_dynamic_module_type_on_http_filter_request_headers_status {
         use abi::envoy_dynamic_module_type_on_http_filter_request_headers_status as Status;
-        use http::{Method, header};
+        use http::Method;
 
-        let method = request_method(envoy_filter);
-        let method_head = method.as_ref() == Some(&Method::HEAD);
-        if !method_head && method.as_ref() != Some(&Method::GET) {
+        // One bulk header fetch: each per-key lookup is its own FFI call and a
+        // scan of Envoy's header map, and we need up to nine headers.
+        let raw = RawRequestHeaders::collect(envoy_filter);
+
+        let method_head = raw.method.as_ref() == Some(&Method::HEAD);
+        if !method_head && raw.method.as_ref() != Some(&Method::GET) {
             self.phase = Phase::Done;
             envoy_filter.send_response(405, &[("allow", b"GET, HEAD".as_slice())], None, None);
             return Status::StopIteration;
         }
 
-        let raw_path = header_string(envoy_filter, ":path").unwrap_or_default();
+        let raw_path = raw.path.unwrap_or_default();
         let raw_path = if let Some(prefix) = self.config.strip_prefix.as_deref() {
             match strip_mount_prefix(&raw_path, prefix) {
                 Some(stripped) => stripped,
@@ -190,15 +193,15 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
             }
         };
 
-        let accept_encoding = header_string(envoy_filter, header::ACCEPT_ENCODING.as_str());
+        let accept_encoding = raw.accept_encoding;
         self.request = Some(RequestData {
             method_head,
-            if_none_match: header_string(envoy_filter, header::IF_NONE_MATCH.as_str()),
-            if_modified_since: header_string(envoy_filter, header::IF_MODIFIED_SINCE.as_str()),
-            if_match: header_string(envoy_filter, header::IF_MATCH.as_str()),
-            if_unmodified_since: header_string(envoy_filter, header::IF_UNMODIFIED_SINCE.as_str()),
-            if_range: header_string(envoy_filter, header::IF_RANGE.as_str()),
-            range_header: header_string(envoy_filter, header::RANGE.as_str()),
+            if_none_match: raw.if_none_match,
+            if_modified_since: raw.if_modified_since,
+            if_match: raw.if_match,
+            if_unmodified_since: raw.if_unmodified_since,
+            if_range: raw.if_range,
+            range_header: raw.range,
             relative: relative.clone(),
             trailing_slash,
         });
@@ -845,16 +848,51 @@ fn strip_mount_prefix(raw_path: &str, prefix: &str) -> Option<String> {
     }
 }
 
-fn request_method<EHF: EnvoyHttpFilter>(envoy_filter: &EHF) -> Option<http::Method> {
-    let value = envoy_filter.get_request_header_value(":method")?;
-    http::Method::from_bytes(value.as_slice()).ok()
+/// The request headers the filter consumes, extracted from one bulk
+/// `get_request_headers` call in a single pass. For duplicated headers the
+/// first occurrence wins and an empty first value counts as absent, matching
+/// the per-key `get_request_header_value` + non-empty filter this replaces.
+#[derive(Default)]
+struct RawRequestHeaders {
+    method: Option<http::Method>,
+    path: Option<String>,
+    accept_encoding: Option<String>,
+    if_none_match: Option<String>,
+    if_modified_since: Option<String>,
+    if_match: Option<String>,
+    if_unmodified_since: Option<String>,
+    if_range: Option<String>,
+    range: Option<String>,
 }
 
-fn header_string<EHF: EnvoyHttpFilter>(envoy_filter: &EHF, key: &str) -> Option<String> {
-    envoy_filter
-        .get_request_header_value(key)
-        .map(|value| String::from_utf8_lossy(value.as_slice()).into_owned())
-        .filter(|value| !value.is_empty())
+impl RawRequestHeaders {
+    fn collect<EHF: EnvoyHttpFilter>(envoy_filter: &EHF) -> Self {
+        let mut raw = Self::default();
+        for (key, value) in envoy_filter.get_request_headers() {
+            // Envoy stores header names lowercased.
+            let slot = match key.as_slice() {
+                b":method" => {
+                    if raw.method.is_none() {
+                        raw.method = http::Method::from_bytes(value.as_slice()).ok();
+                    }
+                    continue;
+                }
+                b":path" => &mut raw.path,
+                b"accept-encoding" => &mut raw.accept_encoding,
+                b"if-none-match" => &mut raw.if_none_match,
+                b"if-modified-since" => &mut raw.if_modified_since,
+                b"if-match" => &mut raw.if_match,
+                b"if-unmodified-since" => &mut raw.if_unmodified_since,
+                b"if-range" => &mut raw.if_range,
+                b"range" => &mut raw.range,
+                _ => continue,
+            };
+            if slot.is_none() && !value.as_slice().is_empty() {
+                *slot = Some(String::from_utf8_lossy(value.as_slice()).into_owned());
+            }
+        }
+        raw
+    }
 }
 
 fn header_refs(headers: &[(http::HeaderName, http::HeaderValue)]) -> Vec<(&str, &[u8])> {
