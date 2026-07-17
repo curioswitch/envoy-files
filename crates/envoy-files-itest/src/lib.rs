@@ -87,18 +87,22 @@ impl EnvoyServer {
         };
 
         let admin_file = unique_tmp("admin").with_extension("txt");
-        let process = Command::new(envoy::envoy_binary())
-            .args([
-                "--config-yaml",
-                &config.to_string(),
-                "--admin-address-path",
-                admin_file.to_str().unwrap(),
-                // Hot restart prevents using a static Envoy among tests since threads dying
-                // get propagated to Envoy itself when hot restart is enabled.
-                "--disable-hot-restart",
-                "--log-level",
-                log_level,
-            ])
+        let mut command = Command::new(envoy::envoy_binary());
+        command.args([
+            "--config-yaml",
+            &config.to_string(),
+            "--admin-address-path",
+            admin_file.to_str().unwrap(),
+            // Hot restart prevents using a static Envoy among tests since threads dying
+            // get propagated to Envoy itself when hot restart is enabled.
+            "--disable-hot-restart",
+            "--log-level",
+            log_level,
+        ]);
+        if capture_log {
+            command.args(["--component-log-level", "http:debug,connection:debug"]);
+        }
+        let process = command
             .env("ENVOY_DYNAMIC_MODULES_SEARCH_PATH", &module_dir)
             // Detach stdio: a server held in a `static` never runs Drop, and
             // an inherited stdout pipe would keep `cargo test | ...` from ever
@@ -120,6 +124,11 @@ impl EnvoyServer {
         server.await_ready(&admin_file);
         let _ = std::fs::remove_file(&admin_file);
         server
+    }
+
+    /// Full captured Envoy log (diagnostics), when started with log capture.
+    pub fn log_contents(&self) -> Option<String> {
+        std::fs::read_to_string(self.log_path.as_ref()?).ok()
     }
 
     /// The io backend the module logged at startup ("compio-io_uring",
@@ -182,6 +191,22 @@ impl EnvoyServer {
             match self.try_request(method, path, headers) {
                 Ok(response) => return response,
                 Err(err) => last_err = Some(err),
+            }
+        }
+        // DIAGNOSTIC: when the server was started with log capture, surface the
+        // tail of Envoy's stderr — a module panic or access violation lands
+        // there and otherwise a bare "connection refused" hides the cause.
+        if let Some(log) = self.log_contents() {
+            // If the admin port still answers, the process is alive and only
+            // the listener/connection died; if it refuses too, Envoy crashed.
+            let admin_alive = agent()
+                .get(format!("http://{}/ready", self.admin_address))
+                .call()
+                .is_ok();
+            eprintln!("--- envoy diagnostics ({path} failed); admin_alive={admin_alive} ---");
+            let lines: Vec<&str> = log.lines().collect();
+            for line in lines.iter().skip(lines.len().saturating_sub(100)) {
+                eprintln!("{line}");
             }
         }
         panic!("http request to {path} failed after retries: {last_err:?}");

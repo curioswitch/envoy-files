@@ -1,13 +1,18 @@
 use std::io::Read;
 use std::sync::LazyLock;
 
-use envoy_files_itest::{EnvoyServer, Www};
+use envoy_files_itest::{EnvoyServer, Www, terminal_config};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
 static SERVER: LazyLock<(Www, EnvoyServer)> = LazyLock::new(|| {
     let www = Www::build();
-    let server = EnvoyServer::terminal(json!({"root": www.path().to_str().unwrap()}));
+    // Capture Envoy's stderr so a mid-transfer-disconnect crash surfaces in CI
+    // (see the log-tail dump in EnvoyServer::request).
+    let server = EnvoyServer::with_config_capturing_backend(
+        terminal_config(json!({"root": www.path().to_str().unwrap()})),
+        false,
+    );
     (www, server)
 });
 
