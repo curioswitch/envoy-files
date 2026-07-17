@@ -244,25 +244,58 @@ async fn open_stat(
     canon_cache: &Rc<RefCell<HashMap<PathBuf, PathBuf>>>,
     closer: Sender<Command>,
 ) -> Result<(FileHandle, FileStat, Vec<u8>), IoError> {
-    let mut options = OpenOptions::new();
-    options.read(true);
+    // Unix: always open with O_NOFOLLOW first. A successful open then proves
+    // the final component is not a symlink, so containment needs no per-open
+    // lstat — just the cached canonical parent. ELOOP with symlinks allowed is
+    // the rare slow path: reopen following the link and fully canonicalize.
     #[cfg(unix)]
-    if request.deny_symlinks {
+    let (file, final_is_symlink) = {
+        let mut options = OpenOptions::new();
+        options.read(true);
         options.custom_flags(libc::O_NOFOLLOW);
-    }
+        match options.open(&request.path).await {
+            Ok(file) => (file, false),
+            // Linux reports a symlink final component as ELOOP, macOS as EMLINK.
+            Err(error)
+                if matches!(error.raw_os_error(), Some(libc::ELOOP) | Some(libc::EMLINK))
+                    && !request.deny_symlinks =>
+            {
+                let mut options = OpenOptions::new();
+                options.read(true);
+                (options.open(&request.path).await?, true)
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     #[cfg(windows)]
-    {
+    let (file, final_is_symlink) = {
+        let mut options = OpenOptions::new();
+        options.read(true);
         // On Windows a directory handle can only be obtained with
         // FILE_FLAG_BACKUP_SEMANTICS; without it CreateFile fails with
         // ERROR_ACCESS_DENIED, so directory index/listing/trailing-slash
         // resolution never sees `is_dir` (it surfaces as a 403 instead).
-        // The flag is harmless for regular files. Symlink handling on Windows
-        // is left to the canonical-containment check below (unlike O_NOFOLLOW,
-        // there is no cheap open-time equivalent here).
+        // The flag is harmless for regular files. There is no O_NOFOLLOW
+        // equivalent here, so the final component is probed with an lstat
+        // below when containment is checked.
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
-    }
-    let file = options.open(&request.path).await?;
+        let file = options.open(&request.path).await?;
+        let is_symlink = if request.containment_root.is_some() {
+            std::fs::symlink_metadata(&request.path)?
+                .file_type()
+                .is_symlink()
+        } else {
+            false
+        };
+        if is_symlink && request.deny_symlinks {
+            return Err(IoError {
+                kind: ErrorKind::PermissionDenied,
+                raw_os_error: None,
+            });
+        }
+        (file, is_symlink)
+    };
     let metadata = file.metadata().await?;
 
     if let Some(root) = &request.containment_root {
@@ -270,7 +303,12 @@ async fn open_stat(
         // must still be inside the root. These are fast path-walk syscalls on a
         // warm dentry cache (~µs) — cheaper to run inline than to pay a
         // blocking-pool thread hand-off (park/unpark plus wake-ups) per open.
-        let canonical = cached_canonicalize(&request.path, canon_cache)?;
+        let canonical = if final_is_symlink {
+            // Follows and resolves the final symlink too.
+            std::fs::canonicalize(&request.path)?
+        } else {
+            parent_cached_canonicalize(&request.path, canon_cache)?
+        };
         if !canonical.starts_with(root) {
             return Err(IoError {
                 kind: ErrorKind::PermissionDenied,
@@ -317,36 +355,35 @@ async fn open_stat(
 /// under the roots; the cap is a backstop, not an LRU.
 const CANON_CACHE_MAX: usize = 4096;
 
-/// `std::fs::canonicalize` with a per-reactor cache of canonical parent
-/// directories. `canonicalize` walks every component (a readlinkat per
-/// segment), which under load was the single largest source of wasted
-/// syscalls (3+/request, all "not a symlink"). Serving is dominated by many
-/// files in few directories, so caching the parent's canonical form reduces
-/// the hot path to one `lstat` of the final component; a final-component
-/// symlink (or an uncached parent) falls back to the full walk. Intermediate
-/// symlinked directories stay caught: the parent's canonicalization resolves
-/// them before the join. The check was already open-then-verify (TOCTOU-racy
-/// against concurrent renames); the cache does not change that model.
-fn cached_canonicalize(
+/// Canonicalizes `path` given that its final component is known not to be a
+/// symlink (proven by an O_NOFOLLOW open on unix, an lstat probe on Windows):
+/// the canonical form is then just the canonical parent joined with the file
+/// name. `canonicalize` walks every component (a readlinkat per segment),
+/// which under load was the single largest source of wasted syscalls
+/// (3+/request, all "not a symlink"); serving is dominated by many files in
+/// few directories, so caching the parent's canonical form makes the hot path
+/// syscall-free. Intermediate symlinked directories stay caught: the parent's
+/// canonicalization resolves them before the join. The check was already
+/// open-then-verify (TOCTOU-racy against concurrent renames); the cache does
+/// not change that model.
+fn parent_cached_canonicalize(
     path: &Path,
     cache: &Rc<RefCell<HashMap<PathBuf, PathBuf>>>,
 ) -> std::io::Result<PathBuf> {
-    if let (Some(parent), Some(name)) = (path.parent(), path.file_name())
-        && !std::fs::symlink_metadata(path)?.file_type().is_symlink()
-    {
-        if let Some(canon_parent) = cache.borrow().get(parent) {
-            return Ok(canon_parent.join(name));
-        }
-        let canon_parent = std::fs::canonicalize(parent)?;
-        let canonical = canon_parent.join(name);
-        let mut cache = cache.borrow_mut();
-        if cache.len() >= CANON_CACHE_MAX {
-            cache.clear();
-        }
-        cache.insert(parent.to_path_buf(), canon_parent);
-        return Ok(canonical);
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return std::fs::canonicalize(path);
+    };
+    if let Some(canon_parent) = cache.borrow().get(parent) {
+        return Ok(canon_parent.join(name));
     }
-    std::fs::canonicalize(path)
+    let canon_parent = std::fs::canonicalize(parent)?;
+    let canonical = canon_parent.join(name);
+    let mut cache = cache.borrow_mut();
+    if cache.len() >= CANON_CACHE_MAX {
+        cache.clear();
+    }
+    cache.insert(parent.to_path_buf(), canon_parent);
+    Ok(canonical)
 }
 
 async fn read_at(file: Option<Rc<File>>, offset: u64, len: usize) -> Result<Vec<u8>, IoError> {
