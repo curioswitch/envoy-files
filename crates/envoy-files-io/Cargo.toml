@@ -8,11 +8,11 @@ publish = false
 [dependencies]
 async-channel = "2.5.0"
 compio-buf = "0.8.3"
-compio-driver = "0.12.4"
+compio-driver = { version = "0.12.4", features = ["polling"] }
 compio-fs = "0.12.0"
 compio-io = "0.10.1"
 compio-runtime = "0.12.3"
 oneshot = { version = "0.2.1", default-features = false, features = ["std"] }
 
-[target.'cfg(unix)'.dependencies]
+[target."cfg(unix)".dependencies]
 libc = "0.2"

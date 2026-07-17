@@ -10,13 +10,11 @@ publish = false
 # `cargo build` of the module, so these heavy deps stay out of the shipping
 # artifact.
 [dependencies]
+flate2 = "1"
 serde_json = "1"
-# No gzip feature: we must see the raw precompressed bytes the module serves,
-# not have ureq transparently decompress them.
+sha2 = "0.10"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
-flate2 = "1"
-sha2 = "0.10"
 
-[target.'cfg(unix)'.dependencies]
+[target."cfg(unix)".dependencies]
 libc = "0.2"
