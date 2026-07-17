@@ -120,6 +120,11 @@ impl EnvoyServer {
         server
     }
 
+    /// Full captured Envoy log (diagnostics), when started with backend capture.
+    pub fn log_contents(&self) -> Option<String> {
+        std::fs::read_to_string(self.log_path.as_ref()?).ok()
+    }
+
     /// The io backend the module logged at startup ("compio-io_uring",
     /// "compio-poll", "compio-iocp", ...). Only populated when started with
     /// [`with_config_capturing_backend`](Self::with_config_capturing_backend);

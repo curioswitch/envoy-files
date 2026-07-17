@@ -224,6 +224,11 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
     fn on_downstream_above_write_buffer_high_watermark(&mut self, _envoy_filter: &mut EHF) {
         if let Phase::Streaming(streaming) = &mut self.phase {
             streaming.watermark_depth += 1;
+            envoy_proxy_dynamic_modules_rust_sdk::envoy_log_info!(
+                "envoy-files: high_watermark next_send={} depth={}",
+                streaming.next_send,
+                streaming.watermark_depth
+            );
         }
     }
 
@@ -231,6 +236,11 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
         let resumed = match &mut self.phase {
             Phase::Streaming(streaming) => {
                 streaming.watermark_depth = streaming.watermark_depth.saturating_sub(1);
+                envoy_proxy_dynamic_modules_rust_sdk::envoy_log_info!(
+                    "envoy-files: low_watermark next_send={} depth={}",
+                    streaming.next_send,
+                    streaming.watermark_depth
+                );
                 streaming.watermark_depth == 0
             }
             _ => false,
@@ -241,6 +251,23 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
     }
 
     fn on_stream_complete(&mut self, _envoy_filter: &mut EHF) {
+        match &self.phase {
+            Phase::Streaming(s) => envoy_proxy_dynamic_modules_rust_sdk::envoy_log_info!(
+                "envoy-files: stream_complete STREAMING next_send={}/{} inflight={} depth={}",
+                s.next_send,
+                s.chunks.len(),
+                s.inflight,
+                s.watermark_depth
+            ),
+            Phase::Done => {
+                envoy_proxy_dynamic_modules_rust_sdk::envoy_log_info!(
+                    "envoy-files: stream_complete DONE"
+                )
+            }
+            _ => envoy_proxy_dynamic_modules_rust_sdk::envoy_log_info!(
+                "envoy-files: stream_complete OTHER"
+            ),
+        }
         // Fence any in-flight I/O: later completions fail their bridge push and
         // drop their buffers on the I/O thread.
         self.bridge.close();
@@ -640,6 +667,12 @@ impl Filter {
             inflight: 0,
             watermark_depth: 0,
         });
+        if let Phase::Streaming(s) = &self.phase {
+            envoy_proxy_dynamic_modules_rust_sdk::envoy_log_info!(
+                "envoy-files: stream_start chunks={}",
+                s.chunks.len()
+            );
+        }
         envoy_filter.send_response_headers(headers, false);
         self.pump(envoy_filter);
     }
@@ -692,6 +725,15 @@ impl Filter {
                         Some(bytes) => {
                             let end_stream = streaming.next_send == last_index;
                             streaming.next_send += 1;
+                            if end_stream || streaming.next_send.is_multiple_of(256) {
+                                envoy_proxy_dynamic_modules_rust_sdk::envoy_log_info!(
+                                    "envoy-files: send next_send={}/{} end_stream={} len={}",
+                                    streaming.next_send,
+                                    streaming.chunks.len(),
+                                    end_stream,
+                                    bytes.len()
+                                );
+                            }
                             Some((bytes, end_stream))
                         }
                         None => None,

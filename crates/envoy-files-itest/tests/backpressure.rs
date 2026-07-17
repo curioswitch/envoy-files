@@ -2,19 +2,32 @@ use std::io::Read;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use envoy_files_itest::{EnvoyServer, Www};
+use envoy_files_itest::{EnvoyServer, Www, terminal_config};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
 static SERVER: LazyLock<(Www, EnvoyServer)> = LazyLock::new(|| {
     let www = Www::build();
-    let server = EnvoyServer::terminal(json!({
-        "root": www.path().to_str().unwrap(),
-        "chunk_size": 65536,
-        "max_inflight_reads": 2,
-    }));
+    // Capture Envoy's log (info level) so the module's streaming diagnostics
+    // are visible in CI when an assertion fails.
+    let server = EnvoyServer::with_config_capturing_backend(
+        terminal_config(json!({
+            "root": www.path().to_str().unwrap(),
+            "chunk_size": 65536,
+            "max_inflight_reads": 2,
+        })),
+        false,
+    );
     (www, server)
 });
+
+fn dump_module_log(server: &EnvoyServer) {
+    if let Some(log) = server.log_contents() {
+        for line in log.lines().filter(|l| l.contains("envoy-files")) {
+            eprintln!("{line}");
+        }
+    }
+}
 
 fn read_http_body_start(stream: &mut impl Read) -> (Vec<u8>, Vec<u8>) {
     // Read until the header/body separator, returning (headers, leftover body).
@@ -59,6 +72,10 @@ fn slow_reader_gets_intact_body() {
     let total = std::fs::metadata(SERVER.0.path().join("big.bin"))
         .unwrap()
         .len() as usize;
+    if received != total {
+        eprintln!("slow_reader truncated: received={received} total={total}");
+        dump_module_log(&SERVER.1);
+    }
     assert_eq!(received, total);
     assert_eq!(format!("{:x}", digest.finalize()), SERVER.0.big_sha256);
 }
