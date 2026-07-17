@@ -217,18 +217,10 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
         let mut events = Vec::new();
         self.bridge.process(|event| events.push(event));
         for event in events {
-            // A handler that ends the stream (any terminal send) may have caused
-            // Envoy to destroy this filter synchronously; `self` is then dangling
-            // and must not be touched again — including the pump below.
             if self.handle_event(envoy_filter, event) {
                 return;
             }
         }
-        // All response body sends happen here, in a fresh dispatcher callback —
-        // never from a watermark hook. Sending reentrantly from within Envoy's
-        // write-buffer watermark callback corrupts stream state (a use-after-free
-        // that segfaults at end-of-stream); the low-watermark hook reschedules us
-        // instead, so the resumed flush lands here.
         if matches!(self.phase, Phase::Streaming(_)) {
             self.pump(envoy_filter);
         }
@@ -248,8 +240,6 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for Filter {
             }
             _ => false,
         };
-        // Do not send from within this hook (reentrant into Envoy's write path
-        // -> UAF). Reschedule so the flush resumes from on_scheduled.
         if resumed && let Some(waker) = &self.waker {
             waker.scheduler.commit(EVENT_ID_IO);
         }
