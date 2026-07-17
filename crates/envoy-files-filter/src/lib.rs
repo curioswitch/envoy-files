@@ -69,6 +69,9 @@ impl Drop for FilterConfig {
 
 impl<EHF: EnvoyHttpFilter> HttpFilterConfig<EHF> for FilterConfig {
     fn new_http_filter(&self, _envoy: &mut EHF) -> Box<dyn HttpFilter<EHF>> {
-        Box::new(Filter::new(self.config.clone(), self.engine.clone()))
+        Box::new(CatchUnwind::new(Filter::new(
+            self.config.clone(),
+            self.engine.clone(),
+        )))
     }
 }

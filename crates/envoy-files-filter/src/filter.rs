@@ -12,7 +12,7 @@ use envoy_files_core::response_plan::{
 use envoy_files_core::validators::ConditionalHeaders;
 use envoy_files_io::{DirEntryInfo, FileHandle, FileStat, IoEngine, IoError, OpenRequest};
 use envoy_proxy_dynamic_modules_rust_sdk::{
-    EnvoyHttpFilter, EnvoyHttpFilterScheduler, HttpFilter, abi,
+    EnvoyHttpFilter, EnvoyHttpFilterScheduler, HttpFilter, abi, envoy_log_error,
 };
 
 use crate::config::{Config, DirectoryMode, RangeSupport};
@@ -660,7 +660,7 @@ impl Filter {
                     Err(error) => {
                         // Headers are already sent, so the only signal left is
                         // to reset the stream by ending it early.
-                        envoy_proxy_dynamic_modules_rust_sdk::envoy_log_error!(
+                        envoy_log_error!(
                             "envoy-files: read failed mid-stream at seq {seq} \
                              (kind={:?} errno={:?}); truncating response",
                             error.kind,

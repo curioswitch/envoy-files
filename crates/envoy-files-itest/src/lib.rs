@@ -93,14 +93,8 @@ impl EnvoyServer {
                 &config.to_string(),
                 "--admin-address-path",
                 admin_file.to_str().unwrap(),
-                // Envoy's hot-restart machinery (enabled in the Linux wheel)
-                // sets PR_SET_PDEATHSIG=SIGTERM, and Linux ties that to the
-                // *thread* that spawned the child. Tests spawn from short-lived
-                // libtest threads (e.g. inside a shared LazyLock init), so an
-                // Envoy left hot-restart-enabled is killed as soon as the
-                // spawning test finishes, truncating other tests' in-flight
-                // responses. No hot restart also means no shared memory, so no
-                // base-id management is needed for parallel instances.
+                // Hot restart prevents using a static Envoy among tests since threads dying
+                // get propagated to Envoy itself when hot restart is enabled.
                 "--disable-hot-restart",
                 "--log-level",
                 log_level,
