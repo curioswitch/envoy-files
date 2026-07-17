@@ -87,7 +87,8 @@ impl EnvoyServer {
         };
 
         let admin_file = unique_tmp("admin").with_extension("txt");
-        let process = Command::new(envoy::envoy_binary())
+        let mut command = Command::new(envoy::envoy_binary());
+        command
             .args([
                 "--config-yaml",
                 &config.to_string(),
@@ -102,9 +103,16 @@ impl EnvoyServer {
             // an inherited stdout pipe would keep `cargo test | ...` from ever
             // seeing EOF. The atexit hook below still kills it.
             .stdout(Stdio::null())
-            .stderr(stderr)
-            .spawn()
-            .expect("spawn envoy");
+            .stderr(stderr);
+        if capture_log {
+            // Downstream connection/stream debug so a captured run shows why a
+            // stream is torn down.
+            command.args([
+                "--component-log-level",
+                "http:debug,connection:debug,pool:debug",
+            ]);
+        }
+        let process = command.spawn().expect("spawn envoy");
         register_for_cleanup(process.id());
 
         let mut server = EnvoyServer {

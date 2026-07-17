@@ -23,7 +23,13 @@ static SERVER: LazyLock<(Www, EnvoyServer)> = LazyLock::new(|| {
 
 fn dump_module_log(server: &EnvoyServer) {
     if let Some(log) = server.log_contents() {
+        eprintln!("--- envoy-files module log ---");
         for line in log.lines().filter(|l| l.contains("envoy-files")) {
+            eprintln!("{line}");
+        }
+        eprintln!("--- last 200 Envoy log lines (teardown) ---");
+        let lines: Vec<&str> = log.lines().collect();
+        for line in lines.iter().skip(lines.len().saturating_sub(200)) {
             eprintln!("{line}");
         }
     }
