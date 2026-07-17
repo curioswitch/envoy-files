@@ -1,0 +1,34 @@
+{
+  "folders": [
+    {
+      "name": "/",
+      "path": ".",
+    },
+  ],
+  "extensions": {
+    "recommendations": [
+      "esbenp.prettier-vscode",
+      "github.vscode-github-actions",
+      "rust-lang.rust-analyzer",
+    ],
+  },
+  "settings": {
+    "editor.formatOnSave": true,
+    "files.insertFinalNewline": true,
+    "[github-actions-workflow]": {
+      "editor.formatOnSave": true,
+      "editor.defaultFormatter": "esbenp.prettier-vscode",
+    },
+    "rust-analyzer.cargo.cfgs": ["debug_assertions", "miri", "Py_GIL_DISABLED"],
+    "[json][jsonc]": {
+      "editor.formatOnSave": true,
+      "editor.defaultFormatter": "esbenp.prettier-vscode",
+    },
+    "yaml.format.enable": false,
+    "[yaml]": {
+      "editor.formatOnSave": true,
+      "editor.defaultFormatter": "esbenp.prettier-vscode",
+    },
+    "liveServer.settings.multiRootWorkspaceName": "/",
+  },
+}

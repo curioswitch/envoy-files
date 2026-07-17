@@ -1,0 +1,45 @@
+name: bench
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.lock"
+      - ".github/workflows/bench.yaml"
+  # Just verify the harness on PRs, no need for actual numbers
+  pull_request:
+    paths:
+      - "crates/envoy-files-itest/**"
+      - ".github/workflows/bench.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install oha
+        run: cargo install oha --locked
+
+      - name: Build module (release)
+        run: cargo build --package envoy-files-filter --release
+
+      - name: Run comparison benchmark
+        run: cargo run --package envoy-files-itest --example bench --release

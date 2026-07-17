@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/envoy-files-core",
+    "crates/envoy-files-filter",
+    "crates/envoy-files-io",
+    "crates/envoy-files-itest",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/curioswitch/envoy-files"
+
+[workspace.dependencies]
+# Pinned to the same fork revision as pyvoy: upstream v1.38.0 plus Windows DLL
+# support (raw-dylib linking of host callbacks). Bump together with the
+# envoy-server pip package used in integration tests.
+envoy-proxy-dynamic-modules-rust-sdk = { git = "https://github.com/anuraaga/envoy", rev = "c63a84f1d9b413dd85a6fb8dd00f77df5d701570" }
+envoy-files-core = { path = "crates/envoy-files-core" }
+envoy-files-io = { path = "crates/envoy-files-io" }
+crossbeam-channel = "0.5.15"
+yaml-rust2 = "0.11.0"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,16 @@
+[package]
+name = "envoy-files-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+headers = "0.4.1"
+html-escape = "0.2"
+http = "1"
+httpdate = "1.0.3"
+# Actively maintained fork of the (unmaintained) mime_guess, with a larger
+# extension table.
+new_mime_guess = "4"
+percent-encoding = "2"

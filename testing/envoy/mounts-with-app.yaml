@@ -1,0 +1,115 @@
+# Serve static folders at path prefixes *alongside* a proxied application,
+# from a single listener. This is the pattern pyvoy uses to mount multiple
+# apps (Envoy's matching API — `ExtensionWithMatcher` + a `:path`
+# prefix_match_map selecting a per-prefix filter config), applied here to the
+# envoy-files terminal filter.
+#
+# Requests under /static/ and /media/ are served from disk by envoy_files
+# (each prefix gets its own filter_config); every other path falls through to
+# the router and is proxied to the `app` cluster.
+#
+# A terminal filter responds before the router, so route-level prefix_rewrite
+# never reaches it. Instead each mount sets strip_prefix,
+# usually the same value as its matcher key): the filter strips it from the
+# request path before resolving against root, and restores it on redirects and
+# listing headings. So /static/app.css -> <root>/app.css.
+#
+# Run with: ENVOY_DYNAMIC_MODULES_SEARCH_PATH=<dir with libenvoy_files.so> \
+#   envoy -c mounts-with-app.yaml
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
+static_resources:
+  listeners:
+    - name: main
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_http
+                generate_request_id: false
+                route_config:
+                  virtual_hosts:
+                    - name: local
+                      domains: ["*"]
+                      # /static/ and /media/ are intercepted by the terminal
+                      # envoy_files filter before routing; everything else is
+                      # proxied to the application.
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: app }
+                http_filters:
+                  # Pick a per-prefix envoy_files config by request path. A
+                  # prefix that matches runs envoy_files (terminal → responds
+                  # directly); a path that matches nothing passes through to
+                  # the router below.
+                  - name: envoy.filters.http.composite
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.common.matching.v3.ExtensionWithMatcher
+                      extension_config:
+                        name: envoy.filters.http.composite
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.composite.v3.Composite
+                      xds_matcher:
+                        matcher_tree:
+                          input:
+                            name: request-path
+                            typed_config:
+                              "@type": type.googleapis.com/envoy.type.matcher.v3.HttpRequestHeaderMatchInput
+                              header_name: ":path"
+                          prefix_match_map:
+                            map:
+                              "/static/":
+                                action:
+                                  name: composite-action
+                                  typed_config:
+                                    "@type": type.googleapis.com/envoy.extensions.filters.http.composite.v3.ExecuteFilterAction
+                                    typed_config:
+                                      name: envoy_files
+                                      typed_config:
+                                        "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilter
+                                        dynamic_module_config:
+                                          { name: envoy_files }
+                                        filter_name: envoy_files
+                                        terminal_filter: true
+                                        filter_config:
+                                          "@type": type.googleapis.com/google.protobuf.StringValue
+                                          value: |
+                                            {"root": "/srv/static-assets", "strip_prefix": "/static",
+                                             "directory": "deny",
+                                             "cache_control": "public, max-age=31536000, immutable"}
+                              "/media/":
+                                action:
+                                  name: composite-action
+                                  typed_config:
+                                    "@type": type.googleapis.com/envoy.extensions.filters.http.composite.v3.ExecuteFilterAction
+                                    typed_config:
+                                      name: envoy_files
+                                      typed_config:
+                                        "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilter
+                                        dynamic_module_config:
+                                          { name: envoy_files }
+                                        filter_name: envoy_files
+                                        terminal_filter: true
+                                        filter_config:
+                                          "@type": type.googleapis.com/google.protobuf.StringValue
+                                          value: |
+                                            {"root": "/srv/media", "strip_prefix": "/media",
+                                             "ranges": "multi",
+                                             "cache_control": "public, max-age=300"}
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: app
+      type: STRICT_DNS
+      load_assignment:
+        cluster_name: app
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 9000 }

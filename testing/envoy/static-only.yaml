@@ -1,0 +1,34 @@
+# Minimal standalone config: serve ./www with envoy-files as a terminal filter.
+# Run with: ENVOY_DYNAMIC_MODULES_SEARCH_PATH=<dir with libenvoy_files.so> \
+#   envoy -c static-only.yaml
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
+static_resources:
+  listeners:
+    - name: main
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_http
+                generate_request_id: false
+                route_config:
+                  virtual_hosts:
+                    - name: local
+                      domains: ["*"]
+                http_filters:
+                  - name: envoy_files
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilter
+                      dynamic_module_config: { name: envoy_files }
+                      filter_name: envoy_files
+                      terminal_filter: true
+                      filter_config:
+                        "@type": type.googleapis.com/google.protobuf.StringValue
+                        value: |
+                          {"root": "./www", "directory": "listing",
+                           "cache_control": "public, max-age=300"}

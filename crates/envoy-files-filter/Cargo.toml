@@ -1,0 +1,18 @@
+[package]
+name = "envoy-files-filter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+name = "envoy_files"
+path = "src/lib.rs"
+
+[dependencies]
+envoy-proxy-dynamic-modules-rust-sdk.workspace = true
+envoy-files-core.workspace = true
+envoy-files-io.workspace = true
+http = "1"
+yaml-rust2.workspace = true

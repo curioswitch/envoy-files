@@ -1,0 +1,49 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  upload:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            built: libenvoy_files.so
+            asset: libenvoy_files-linux-x86_64.so
+            sha: sha256sum
+          - os: macos-15
+            built: libenvoy_files.dylib
+            asset: libenvoy_files-macos-aarch64.dylib
+            sha: shasum -a 256
+          - os: windows-2025
+            built: envoy_files.dll
+            asset: envoy_files-windows-x86_64.dll
+            sha: sha256sum
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Build module
+        run: cargo build --package envoy-files-filter --release
+
+      - name: Package and upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "target/release/${{ matrix.built }}" "${{ matrix.asset }}"
+          ${{ matrix.sha }} "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          gh release upload "$GITHUB_REF_NAME" \
+            "${{ matrix.asset }}" "${{ matrix.asset }}.sha256" --clobber

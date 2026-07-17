@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-15
+          - ubuntu-24.04
+          - windows-2025
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --workspace --exclude envoy-files-itest
+
+      - name: Build module
+        run: cargo build --package envoy-files-filter
+
+      - name: Integration tests
+        run: cargo test --package envoy-files-itest
