@@ -6,7 +6,10 @@
 //!   cargo build -p envoy-files-filter --release
 //!   cargo run -p envoy-files-itest --example bench --release
 
-use std::process::Command;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use envoy_files_itest::{EnvoyServer, Www, builtin_file_server_config, terminal_config};
 use serde_json::{Value, json};
@@ -59,18 +62,14 @@ fn oha(port: u16, path: &str, connections: &str) -> Sample {
     }
 }
 
-fn bench(label: &str, config: Value) {
-    let server = EnvoyServer::with_config_capturing_backend(config, true);
-    let suffix = server
-        .io_backend()
-        .map(|backend| format!("  [io backend: {backend}]"))
-        .unwrap_or_default();
-    println!("\n{label}{suffix}");
+/// Runs the small- and large-file load against an already-listening port and
+/// prints one result line each.
+fn report(port: u16) {
     for (path, conn, large) in [
         ("/index.html", SMALL_CONN, false),
         ("/big.bin", LARGE_CONN, true),
     ] {
-        let s = oha(server.port, path, conn);
+        let s = oha(port, path, conn);
         if s.ok_2xx == 0 {
             println!("  {path:<12} not functional on this platform (no 2xx)");
             continue;
@@ -92,6 +91,127 @@ fn bench(label: &str, config: Value) {
     }
 }
 
+fn bench(label: &str, config: Value) {
+    let server = EnvoyServer::with_config_capturing_backend(config, true);
+    let suffix = server
+        .io_backend()
+        .map(|backend| format!("  [io backend: {backend}]"))
+        .unwrap_or_default();
+    println!("\n{label}{suffix}");
+    report(server.port);
+}
+
+/// Best-effort one-shot HTTP GET; returns the numeric status, or None on any
+/// transport error (used only to poll for readiness).
+fn http_status(port: u16, path: &str) -> Option<u16> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
+    let mut buf = [0u8; 64];
+    let n = stream.read(&mut buf).ok()?;
+    // "HTTP/1.1 200 ..." -> parse the status token.
+    let head = std::str::from_utf8(&buf[..n]).ok()?;
+    head.split(' ').nth(1)?.parse().ok()
+}
+
+/// Benchmarks the Built-on-Envoy `file-server` extension via the `boe` CLI,
+/// but only when `boe` is installed (CI adds it explicitly). `boe run` manages
+/// its own Envoy + the Go composer plugin, so — unlike the other rows, which
+/// share our test harness — it runs as a subprocess and we drive load against
+/// its listener.
+#[cfg(unix)]
+fn bench_boe(root: &str) {
+    use std::os::unix::process::CommandExt;
+
+    const PORT: u16 = 18080;
+    const ADMIN: u16 = 18081;
+
+    println!("\nboe file-server");
+    if Command::new("boe")
+        .arg("--help")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(true)
+    {
+        println!("  skipped (boe not installed)");
+        return;
+    }
+
+    let config = json!({
+        "path_mappings": [{"request_path_prefix": "/", "file_path_prefix": root}],
+        "content_types": {"html": "text/html", "bin": "application/octet-stream"},
+        "default_content_type": "application/octet-stream",
+        "directory_index_files": ["index.html"],
+    })
+    .to_string();
+
+    // `boe run` builds/downloads the extension and Envoy on first use, so allow
+    // a generous startup window. Own process group so the whole tree (boe +
+    // its Envoy child) can be torn down together.
+    let mut child = match Command::new("boe")
+        .args([
+            "run",
+            "--extension",
+            "file-server",
+            "--dev",
+            "--config",
+            &config,
+            "--listen-port",
+            &PORT.to_string(),
+            "--admin-port",
+            &ADMIN.to_string(),
+            "--log-level",
+            "all:error",
+        ])
+        .process_group(0)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            println!("  skipped (failed to spawn boe: {error})");
+            return;
+        }
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break; // boe exited before serving.
+        }
+        if http_status(PORT, "/index.html") == Some(200) {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    if ready {
+        report(PORT);
+    } else {
+        println!("  skipped (boe did not become ready; see `boe logs`)");
+    }
+
+    // Tear down the whole process group.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn bench_boe(_root: &str) {
+    println!("\nboe file-server\n  skipped (unix only)");
+}
+
 fn main() {
     let www = Www::build();
     let root = www.path().to_str().unwrap();
@@ -106,4 +226,5 @@ fn main() {
         terminal_config(json!({"root": root, "force_blocking": true})),
     );
     bench("built-in file_server", builtin_file_server_config(root));
+    bench_boe(root);
 }
