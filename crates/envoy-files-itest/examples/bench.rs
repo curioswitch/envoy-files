@@ -181,7 +181,8 @@ fn bench(label: &str, config: Value) {
 }
 
 /// Best-effort one-shot HTTP GET; returns the numeric status, or None on any
-/// transport error (used only to poll for readiness).
+/// transport error (used only to poll boe for readiness).
+#[cfg(unix)]
 fn http_status(port: u16, path: &str) -> Option<u16> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
