@@ -140,6 +140,7 @@ fn report_hol(port: u16) {
 fn report(port: u16) {
     for (path, conn, large) in [
         ("/index.html", SMALL_CONN, false),
+        ("/home.html", SMALL_CONN, false),
         ("/big.bin", LARGE_CONN, true),
     ] {
         warmup(port, path, conn);

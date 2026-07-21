@@ -23,6 +23,8 @@ impl Www {
         std::fs::create_dir_all(&root).expect("create www");
 
         write(&root, "index.html", b"<html>home</html>");
+        // home.html: the envoyproxy.io homepage (~16 KiB)
+        write(&root, "home.html", include_bytes!("../fixtures/home.html"));
         write(&root, "hello.txt", b"hello world\n");
         // data.bin: 10240 bytes, values 0..256 repeated, for range tests.
         let data: Vec<u8> = (0..10240).map(|i| (i % 256) as u8).collect();
