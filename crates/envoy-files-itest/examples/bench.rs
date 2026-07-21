@@ -98,8 +98,45 @@ fn ttfb_once(port: u16, path: &str) -> Option<f64> {
     Some(t0.elapsed().as_secs_f64() * 1000.0)
 }
 
+/// Head-of-line blocking probe: measures /index.html latency while /big.bin
+/// transfers are continuously in flight. A server that performs file I/O
+/// inline on Envoy worker threads stalls every connection sharing the worker,
+/// which shows up here as an exploding p99 relative to the plain
+/// /index.html line.
+fn report_hol(port: u16) {
+    let url = format!("http://127.0.0.1:{port}/big.bin");
+    // Background big-file traffic, killed once the measurement completes.
+    let mut big = match Command::new("oha")
+        .args(["-z", "600s", "-c", LARGE_CONN, "--no-tui", &url])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            println!("  hol: skipped (failed to spawn background oha: {error})");
+            return;
+        }
+    };
+    // Let the big-file transfers get in flight before measuring.
+    std::thread::sleep(Duration::from_secs(1));
+    warmup(port, "/index.html", SMALL_CONN);
+    let s = oha(port, "/index.html", SMALL_CONN);
+    let _ = big.kill();
+    let _ = big.wait();
+    if s.ok_2xx == 0 {
+        println!("  hol: not functional on this platform (no 2xx)");
+        return;
+    }
+    println!(
+        "  {:<12} {:>9.1} rps   p50={:>7.2}ms   p99={:>7.2}ms   2xx={}   (+{LARGE_CONN} in-flight /big.bin)",
+        "/index+big", s.rps, s.p50_ms, s.p99_ms, s.ok_2xx
+    );
+}
+
 /// Runs the small- and large-file load against an already-listening port and
-/// prints one result line each. The large-file line also reports TTFB.
+/// prints one result line each, plus a head-of-line blocking line. The
+/// large-file line also reports TTFB.
 fn report(port: u16) {
     for (path, conn, large) in [
         ("/index.html", SMALL_CONN, false),
@@ -129,6 +166,7 @@ fn report(port: u16) {
             println!();
         }
     }
+    report_hol(port);
 }
 
 fn bench(label: &str, config: Value) {
