@@ -91,9 +91,53 @@ See [testing/envoy/mounts-with-app.yaml](testing/envoy/mounts-with-app.yaml)
 for a complete config.
 
 A terminal filter responds before the router, so route-level `prefix_rewrite`
-never reaches it. Set `strip_prefix` on each moun so the filter strips it before
+never reaches it. Set `strip_prefix` on each mount so the filter strips it before
 resolving against `root` — `/static/app.css` with `strip_prefix: /static` is
 served from `<root>/app.css`.
+
+## Performance
+
+Benchmarks are run against every commit in the [bench](./.github/workflows/bench.yaml)
+workflow. GitHub action runners are highly virtualized and do not have stable
+performance across runs, but the relative numbers within a run should still be
+somewhat, though not precisely, informative. Always measure your own workloads,
+these are to get an idea of performance compared to other approaches.
+One run looks like this:
+
+```text
+envoy-files (compio)  [io backend: compio-io_uring]
+  /index.html    25914.8 rps   p50=   1.87ms   p99=   3.44ms   2xx=1554940
+  /home.html     24498.5 rps   p50=   1.99ms   p99=   3.62ms   2xx=1469913
+  /big.bin          35.2 rps   p50= 114.15ms   p99= 129.90ms   2xx=2108   ~3513 MiB/s   ttfb=0.24ms
+  /index+big     19733.3 rps   p50=   2.46ms   p99=   4.51ms   2xx=1183990   (+4 in-flight /big.bin)
+built-in file_server
+  /index.html    31373.2 rps   p50=   1.54ms   p99=   2.96ms   2xx=1882463
+  /home.html     30212.2 rps   p50=   1.61ms   p99=   3.07ms   2xx=1812781
+  /big.bin          21.0 rps   p50= 190.58ms   p99= 209.61ms   2xx=1256   ~2093 MiB/s   ttfb=0.23ms
+  /index+big     26447.0 rps   p50=   1.83ms   p99=   3.62ms   2xx=1586862   (+4 in-flight /big.bin)
+boe file-server
+  /index.html    26173.4 rps   p50=   1.80ms   p99=   4.43ms   2xx=1570466
+  /home.html     22181.6 rps   p50=   2.12ms   p99=   5.38ms   2xx=1330969
+  /big.bin          42.0 rps   p50=  85.02ms   p99= 190.39ms   2xx=2515   ~4192 MiB/s   ttfb=20.45ms
+  /index+big      7333.4 rps   p50=   3.27ms   p99=  53.86ms   2xx=439972   (+4 in-flight /big.bin)
+```
+
+When comparing to the built-in file server, we see that for small payloads that fit within a single
+chunk, envoy-files is about a 15% slower. This is because there is minimal I/O overhead for small
+files that fit in the OS's file cache, and most time is in dispatching from the worker back
+to Envoy, which has unavoidable overhead due to the dynamic modules mechanism vs a native
+filter. On the flip side, for a large file, envoy-files is about 50% faster, reflecting
+the improved I/O performance from asynchronous I/O. In general, envoy-files seems to provide
+high and stable performance across any file size, with greater benefit for very large files.
+
+[boe's file-server](https://builtonenvoy.io/extensions/file-server/) is another dynamic module
+option, written in Go. However, it seems to buffer the entire file in memory on the Envoy worker
+thread. We see this with high p99 latencies and time-to-first-byte, with the latter also indicating
+poor performance in high-latency (i.e. external web server) environments due to no backpressure.
+Due to blocking the Envoy's worker thread, we can also see the case with small and big files
+served together having issues due to worker starvation. We will continue to include it
+in case the architecture improves in the future, but for now it seems to not be production-ready
+like the other two options.
 
 ## Testing
 
