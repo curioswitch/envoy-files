@@ -38,8 +38,13 @@ jobs:
       - name: Install oha
         run: cargo install oha --locked
 
+      - name: Install boe
+        run: curl -sL https://builtonenvoy.io/install.sh | sh
+
       - name: Build module (release)
         run: cargo build --package envoy-files-filter --release
 
       - name: Run comparison benchmark
         run: cargo run --package envoy-files-itest --example bench --release
+        env:
+          BENCH_DURATION: 60s
