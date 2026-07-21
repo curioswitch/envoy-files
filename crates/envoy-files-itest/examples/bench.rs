@@ -14,7 +14,13 @@ use std::time::{Duration, Instant};
 use envoy_files_itest::{EnvoyServer, Www, builtin_file_server_config, terminal_config};
 use serde_json::{Value, json};
 
-const DURATION: &str = "8s";
+// Per-endpoint measurement window. Overridable (BENCH_DURATION=15s) since large
+// files need a longer window for a stable byte-throughput reading.
+fn duration() -> String {
+    std::env::var("BENCH_DURATION").unwrap_or_else(|_| "10s".to_string())
+}
+
+const WARMUP: &str = "2s";
 const SMALL_CONN: &str = "50";
 // Large files at high concurrency just exhaust the loopback accept queue and
 // oha reports the refused attempts as failures; low concurrency measures real
@@ -28,12 +34,19 @@ struct Sample {
     ok_2xx: u64,
 }
 
+fn warmup(port: u16, path: &str, connections: &str) {
+    let url = format!("http://127.0.0.1:{port}{path}");
+    let _ = Command::new("oha")
+        .args(["-z", WARMUP, "-c", connections, "--no-tui", &url])
+        .output();
+}
+
 fn oha(port: u16, path: &str, connections: &str) -> Sample {
     let url = format!("http://127.0.0.1:{port}{path}");
     let out = Command::new("oha")
         .args([
             "-z",
-            DURATION,
+            &duration(),
             "-c",
             connections,
             "--no-tui",
@@ -62,13 +75,37 @@ fn oha(port: u16, path: &str, connections: &str) -> Sample {
     }
 }
 
+/// Median time-to-first-byte over a few samples.
+fn ttfb_ms(port: u16, path: &str) -> Option<f64> {
+    let mut samples: Vec<f64> = (0..7).filter_map(|_| ttfb_once(port, path)).collect();
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(samples[samples.len() / 2])
+}
+
+fn ttfb_once(port: u16, path: &str) -> Option<f64> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .ok()?;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    let t0 = Instant::now();
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut byte = [0u8; 1];
+    stream.read_exact(&mut byte).ok()?;
+    Some(t0.elapsed().as_secs_f64() * 1000.0)
+}
+
 /// Runs the small- and large-file load against an already-listening port and
-/// prints one result line each.
+/// prints one result line each. The large-file line also reports TTFB.
 fn report(port: u16) {
     for (path, conn, large) in [
         ("/index.html", SMALL_CONN, false),
         ("/big.bin", LARGE_CONN, true),
     ] {
+        warmup(port, path, conn);
         let s = oha(port, path, conn);
         if s.ok_2xx == 0 {
             println!("  {path:<12} not functional on this platform (no 2xx)");
@@ -80,9 +117,12 @@ fn report(port: u16) {
         );
         if large {
             let bytes = 100 * 1024 * 1024u64;
-            let secs: f64 = DURATION.trim_end_matches('s').parse().unwrap_or(8.0);
+            let secs: f64 = duration().trim_end_matches('s').parse().unwrap_or(10.0);
+            let ttfb = ttfb_ms(port, path)
+                .map(|ms| format!("{ms:.2}ms"))
+                .unwrap_or_else(|| "n/a".to_string());
             println!(
-                "   ~{:.0} MiB/s",
+                "   ~{:.0} MiB/s   ttfb={ttfb}",
                 s.ok_2xx as f64 * bytes as f64 / secs / (1024.0 * 1024.0)
             );
         } else {
@@ -215,7 +255,7 @@ fn bench_boe(_root: &str) {
 fn main() {
     let www = Www::build();
     let root = www.path().to_str().unwrap();
-    println!("root={root}  duration={DURATION}");
+    println!("root={root}  duration={}  warmup={WARMUP}", duration());
 
     bench(
         "envoy-files (compio)",
