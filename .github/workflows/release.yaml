@@ -22,6 +22,10 @@ jobs:
             built: libenvoy_files.so
             asset: libenvoy_files-linux-x86_64.so
             sha: sha256sum
+          - os: ubuntu-24.04-arm
+            built: libenvoy_files.so
+            asset: libenvoy_files-linux-aarch64.so
+            sha: sha256sum
           - os: macos-15
             built: libenvoy_files.dylib
             asset: libenvoy_files-macos-aarch64.dylib
