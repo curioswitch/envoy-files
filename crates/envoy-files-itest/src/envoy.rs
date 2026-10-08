@@ -130,7 +130,7 @@ fn locate_module() -> PathBuf {
     assert!(
         path.exists(),
         "module not found at {} — build it first: \
-         `cargo build --package envoy-files-filter{release_flag}`",
+         `cargo build --package envoy-files-module{release_flag}`",
         path.display(),
     );
     path

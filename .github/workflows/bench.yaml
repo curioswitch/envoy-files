@@ -42,7 +42,7 @@ jobs:
         run: curl -sL https://builtonenvoy.io/install.sh | sh
 
       - name: Build module (release)
-        run: cargo build --package envoy-files-filter --release
+        run: cargo build --package envoy-files-module --release
 
       - name: Run comparison benchmark
         run: cargo run --package envoy-files-itest --example bench --release

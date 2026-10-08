@@ -4,6 +4,7 @@ members = [
   "crates/envoy-files-core",
   "crates/envoy-files-filter",
   "crates/envoy-files-io",
+  "crates/envoy-files-module",
   "crates/envoy-files-itest",
 ]
 
@@ -16,6 +17,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 crossbeam-channel = "0.5.15"
 envoy-files-core = { path = "crates/envoy-files-core" }
+envoy-files-filter = { path = "crates/envoy-files-filter" }
 envoy-files-io = { path = "crates/envoy-files-io" }
 envoy-proxy-dynamic-modules-rust-sdk = {
   git = "https://github.com/anuraaga/envoy",
