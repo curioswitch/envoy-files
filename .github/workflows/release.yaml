@@ -41,7 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build module
-        run: cargo build --package envoy-files-filter --release
+        run: cargo build --package envoy-files-module --release
 
       - name: Package and upload
         shell: bash

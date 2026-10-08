@@ -144,11 +144,11 @@ like the other two options.
 - Unit tests (pure logic + I/O engine):
   `cargo test --workspace --exclude envoy-files-itest`
 - Integration tests against a real Envoy: build the module, then run the tests:
-  `cargo build -p envoy-files-filter && cargo test -p envoy-files-itest`.
+  `cargo build -p envoy-files-module && cargo test -p envoy-files-itest`.
   The [itest crate](crates/envoy-files-itest) fetches the Envoy binary from the
   `envoy-server` PyPI wheel (cached under `target/`), locates the prebuilt
   module matching the test binary's profile, stages it, and drives real HTTP
   requests. (CI runs the build step explicitly; the harness never builds.)
 - Benchmark (oha must be installed) — build the module in release to match:
-  `cargo build -p envoy-files-filter --release && cargo run -p envoy-files-itest --example bench --release`.
+  `cargo build -p envoy-files-module --release && cargo run -p envoy-files-itest --example bench --release`.
   Also runs in CI on pushes to `main` ([bench.yaml](.github/workflows/bench.yaml)).

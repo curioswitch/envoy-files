@@ -1,6 +1,3 @@
-// The SDK's set_factory_once! macro compares function pointers.
-#![allow(unpredictable_function_pointer_comparisons)]
-
 use std::sync::Arc;
 
 use envoy_files_io::{IoConfig, IoEngine, select_backend};
@@ -13,15 +10,12 @@ mod filter;
 use config::Config;
 use filter::Filter;
 
-declare_init_functions!(init, new_http_filter_config_fn);
-
-// Windows has no RTLD_NOLOAD, so the same module may be initialized more than
-// once in a process; keep this idempotent.
-fn init() -> bool {
-    true
-}
-
-fn new_http_filter_config_fn<EC: EnvoyHttpFilterConfig, EHF: EnvoyHttpFilter>(
+/// Creates the filter config for an envoy-files filter.
+///
+/// This is the `new_http_filter_config_fn` of the envoy-files dynamic module
+/// and is also exported so other modules can serve static files under their
+/// own entrypoint.
+pub fn new_http_filter_config_fn<EC: EnvoyHttpFilterConfig, EHF: EnvoyHttpFilter>(
     _envoy_filter_config: &mut EC,
     _filter_name: &str,
     filter_config: &[u8],

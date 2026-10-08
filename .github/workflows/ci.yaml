@@ -39,7 +39,7 @@ jobs:
         run: cargo test --workspace --exclude envoy-files-itest
 
       - name: Build module
-        run: cargo build --package envoy-files-filter
+        run: cargo build --package envoy-files-module
 
       - name: Integration tests
         run: cargo test --package envoy-files-itest
