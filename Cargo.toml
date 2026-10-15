@@ -4,8 +4,8 @@ members = [
   "crates/envoy-files-core",
   "crates/envoy-files-filter",
   "crates/envoy-files-io",
-  "crates/envoy-files-module",
   "crates/envoy-files-itest",
+  "crates/envoy-files-module",
 ]
 
 [workspace.package]
@@ -19,10 +19,7 @@ crossbeam-channel = "0.5.15"
 envoy-files-core = { path = "crates/envoy-files-core" }
 envoy-files-filter = { path = "crates/envoy-files-filter" }
 envoy-files-io = { path = "crates/envoy-files-io" }
-envoy-proxy-dynamic-modules-rust-sdk = {
-  git = "https://github.com/anuraaga/envoy",
-  rev = "245289bc0d9664a885c71a23df1deccb0511fb44"
-}
+envoy-proxy-dynamic-modules-rust-sdk = { git = "https://github.com/envoyproxy/envoy", tag = "v1.40.0" }
 yaml-rust2 = "0.11.0"
 
 [profile.release]
